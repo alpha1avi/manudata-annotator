@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model weights & checkpoints
+*.pt
+*.pth
+*.onnx
+checkpoints/
+weights/
+
+# Outputs
+output/
+annotations/
+frames/
+
+# Logs
+*.log
+annotator.log
+
+# Jupyter
+.ipynb_checkpoints/
