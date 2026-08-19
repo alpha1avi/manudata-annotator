@@ -243,6 +243,55 @@ manudata-qc-render run /workspace/videos \
 
 Prints the ranked table and writes `/workspace/out/qc_report.csv`.
 
+## 8b. Full-length renders across several pods
+
+For long source videos (20-30 min) delivered whole, two flags matter.
+
+**`--workers N`** processes N videos concurrently, one process each —
+inference, analysis and render for a video all stay inside one worker, so
+nothing about frame alignment is split across processes. Verified
+byte-identical to a sequential run.
+
+Budget VRAM at roughly **6 GB per worker** for WiLoR:
+
+| GPU | Sensible `--workers` |
+|---|---|
+| RTX 4090 / 3090 (24 GB) | 3 |
+| A6000 / L40S (48 GB) | 4-6 |
+
+Also give it cores: compositing is ~19 ms/frame/worker and single-threaded
+per video, so 4 workers wants 16+ vCPU to avoid starving x264.
+
+**`--shard I/N`** splits the video list round-robin across pods, so three
+instances cover one batch with no overlap and no manual file-splitting.
+Round-robin rather than contiguous blocks, so one pod does not inherit
+every long file.
+
+```bash
+# Pod 1                      # Pod 2                      # Pod 3
+--shard 1/3 --workers 3      --shard 2/3 --workers 3      --shard 3/3 --workers 3
+```
+
+Each pod needs the whole video directory and the same manifest; it will
+only touch its own shard. Outputs land in each pod's own `--out`, so
+collect the three `renders/` directories afterwards.
+
+### Size ceiling on long renders
+
+`--max-size-mb 50` is right for a 25-second clip and **wrong for a
+25-minute one** — it works out around 260 kbps, which is unusable for
+judging keypoint accuracy. For full-length renders either raise it a lot
+or turn it off:
+
+```bash
+--max-size-mb 0      # no cap; quality set by CRF, ~600-900 MB per 25 min
+```
+
+The tool warns before rendering when a ceiling implies under ~2500 kbps,
+naming the video and the size that would actually work. A 25-minute render
+is a Drive link, not an email attachment — keep the 50 MB ceiling for the
+reel, which is the thing that gets attached.
+
 ## 9. Full batch
 
 ```bash

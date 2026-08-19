@@ -395,6 +395,56 @@ def test_resume_rejects_missing_sidecar_and_wrong_settings(tmp_path):
     assert output_is_complete(out, cfg, 300, "clip.mp4") is False
 
 
+def test_shard_splits_without_overlap_or_loss():
+    """Several pods must cover the batch exactly once between them."""
+    from qc.parallel import shard
+
+    items = [f"v{i}.mp4" for i in range(10)]
+    parts = [shard(items, i, 3) for i in (1, 2, 3)]
+
+    assert sum(len(p) for p in parts) == len(items)
+    assert sorted(x for p in parts for x in p) == sorted(items)
+    for a in range(3):
+        for b in range(a + 1, 3):
+            assert not set(parts[a]) & set(parts[b])
+
+
+def test_shard_is_round_robin_not_contiguous():
+    """Round-robin keeps long and short videos spread across pods."""
+    from qc.parallel import shard
+
+    items = list(range(9))
+    assert shard(items, 1, 3) == [0, 3, 6]
+    assert shard(items, 2, 3) == [1, 4, 7]
+    assert shard(items, 3, 3) == [2, 5, 8]
+
+
+def test_shard_rejects_bad_ranges():
+    from qc.parallel import shard
+
+    with pytest.raises(ValueError):
+        shard([1, 2, 3], 0, 3)
+    with pytest.raises(ValueError):
+        shard([1, 2, 3], 4, 3)
+
+
+@pytest.mark.parametrize("text,expected", [("1/3", (1, 3)), ("3/3", (3, 3))])
+def test_parse_shard_accepts_valid(text, expected):
+    from qc.cli import _parse_shard
+
+    assert _parse_shard(text) == expected
+
+
+@pytest.mark.parametrize("text", ["0/3", "4/3", "abc", "1/0", "1"])
+def test_parse_shard_rejects_invalid(text):
+    import argparse
+
+    from qc.cli import _parse_shard
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_shard(text)
+
+
 def test_fingerprint_changes_with_render_affecting_settings():
     base = RenderConfig()
     assert base.fingerprint() == RenderConfig().fingerprint()
