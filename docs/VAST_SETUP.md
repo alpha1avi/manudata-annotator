@@ -105,17 +105,37 @@ python -m venv .venv && source .venv/bin/activate
 pip install --upgrade pip
 ```
 
-Install torch **first**, from the index matching the instance's CUDA
-runtime. This is the single most common way to lose an hour:
+Install torch **first**, from the index matching the **GPU architecture**,
+not just the driver version. This is the single most common way to lose an
+hour:
 
 ```bash
-# CUDA 12.1 (matches the image recommended above)
+nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+```
+
+| Compute capability | GPU | Install |
+|---|---|---|
+| **12.0** | RTX 5090 / 5080 (Blackwell) | `torch==2.7.0 torchvision==0.22.0` from `.../whl/cu128` |
+| 8.9 / 8.6 | RTX 4090 / 3090 (Ada, Ampere) | `torch==2.5.1 torchvision==0.20.1` from `.../whl/cu121` |
+| older, CUDA 11.8 driver | — | same versions from `.../whl/cu118` |
+
+```bash
+# Blackwell (RTX 50-series)
+pip install torch==2.7.0 torchvision==0.22.0 \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Ada / Ampere
 pip install torch==2.5.1 torchvision==0.20.1 \
     --index-url https://download.pytorch.org/whl/cu121
 ```
 
-If `nvidia-smi` shows CUDA 11.8, use `--index-url .../whl/cu118` and the
-matching torch build instead. Verify before going further:
+**Blackwell is the trap.** A cu121 build reports the 5090 as available and
+then dies at the first kernel launch with *"no kernel image is available
+for execution on the device"* — which reads like a broken driver rather
+than a wrong wheel. `torch.cuda.is_available()` returning True proves
+nothing here; only running an actual op does.
+
+Verify before going further:
 
 ```bash
 python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"

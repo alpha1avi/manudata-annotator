@@ -18,12 +18,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# WiLoR inference. Install torch from the index matching the instance's
-# CUDA runtime first — see VAST_SETUP.md; a mismatch here wastes more
-# rental time than anything else in the setup.
+# WiLoR inference.
+#
+# torch and torchvision are deliberately NOT pinned here. The correct build
+# depends on the GPU: Blackwell (RTX 50-series, sm_120) needs cu128 wheels,
+# older cards work on cu121. Pinning an exact version in this extra would
+# silently downgrade a correctly-installed CUDA build back to a generic one
+# the moment this package is installed.
+#
+# Install torch first, from the index matching the card — scripts/
+# vast_bootstrap.sh does this automatically, and VAST_SETUP.md documents it.
 wilor = [
-    "torch==2.5.1",
-    "torchvision==0.20.1",
+    "torch>=2.5",
+    "torchvision>=0.20",
     "ultralytics==8.3.40",
 ]
 dev = [

@@ -30,13 +30,33 @@ DRIVER_CUDA="$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' | head -1 
 [ -n "$DRIVER_CUDA" ] || die "Could not read the CUDA version from nvidia-smi."
 echo "Driver supports CUDA up to: $DRIVER_CUDA"
 
-# torch's cu121 build needs a driver advertising >= 12.1.
+COMPUTE_CAP="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+    | head -1 | tr -d ' ' || true)"
+echo "GPU compute capability: ${COMPUTE_CAP:-unknown}"
+
+# Pick the torch build by GPU architecture, not just driver version.
+#
+# Blackwell (RTX 50-series, compute capability 12.0) has no kernels in the
+# cu121 wheels — torch 2.5 on a 5090 fails at the first kernel launch with
+# "no kernel image is available for execution on the device". It needs the
+# cu128 build of torch 2.7+.
 CUDA_TAG="cu121"
-if [ "$(printf '%s\n12.1\n' "$DRIVER_CUDA" | sort -V | head -1)" != "12.1" ]; then
+TORCH_VER="2.5.1"
+TORCHVISION_VER="0.20.1"
+
+if [ -n "$COMPUTE_CAP" ] && \
+   [ "$(printf '%s\n12.0\n' "$COMPUTE_CAP" | sort -V | head -1)" = "12.0" ]; then
+    CUDA_TAG="cu128"
+    TORCH_VER="2.7.0"
+    TORCHVISION_VER="0.22.0"
+    echo "Blackwell-class GPU detected — using the cu128 build."
+elif [ "$(printf '%s\n12.1\n' "$DRIVER_CUDA" | sort -V | head -1)" != "12.1" ]; then
     CUDA_TAG="cu118"
+    TORCH_VER="2.5.1"
+    TORCHVISION_VER="0.20.1"
     warn "Driver predates CUDA 12.1 — falling back to the cu118 torch build."
 fi
-echo "Will install torch for: $CUDA_TAG"
+echo "Will install torch $TORCH_VER / torchvision $TORCHVISION_VER ($CUDA_TAG)"
 
 # ── 2. System packages ────────────────────────────────────────────────
 say "Installing ffmpeg, git, python3-venv"
@@ -66,23 +86,39 @@ say "Creating the virtualenv"
 source .venv/bin/activate
 pip install --quiet --upgrade pip
 
-say "Installing torch ($CUDA_TAG) — the slowest step, ~2 GB"
-if [ "$CUDA_TAG" = "cu121" ]; then
-    pip install --quiet torch==2.5.1 torchvision==0.20.1 \
-        --index-url https://download.pytorch.org/whl/cu121
-else
-    pip install --quiet torch==2.5.1 torchvision==0.20.1 \
-        --index-url https://download.pytorch.org/whl/cu118
-fi
+say "Installing torch $TORCH_VER ($CUDA_TAG) — the slowest step, ~2-3 GB"
+pip install --quiet "torch==$TORCH_VER" "torchvision==$TORCHVISION_VER" \
+    --index-url "https://download.pytorch.org/whl/$CUDA_TAG"
 
-say "Verifying torch sees the GPU"
-python - <<'PY' || die "torch cannot see the GPU. Do not continue — WiLoR would silently run on CPU, ~100x slower."
-import sys, torch
+say "Verifying torch can actually run a kernel on the GPU"
+# Not just is_available(): a torch build without kernels for this
+# architecture reports the device happily and then fails at the first real
+# operation. So do a real matmul.
+python - <<'PY' || die "torch cannot run on this GPU. Do not continue — see the error above."
+import sys
+import torch
+
 print("torch:", torch.__version__, "cuda build:", torch.version.cuda)
 if not torch.cuda.is_available():
     print("torch.cuda.is_available() == False")
     sys.exit(1)
-print("device:", torch.cuda.get_device_name(0))
+
+name = torch.cuda.get_device_name(0)
+cap = torch.cuda.get_device_capability(0)
+print(f"device: {name} (sm_{cap[0]}{cap[1]})")
+print("arch list in this build:", torch.cuda.get_arch_list())
+
+try:
+    x = torch.randn(256, 256, device="cuda")
+    torch.mm(x, x).sum().item()
+except RuntimeError as exc:
+    print("\nA real CUDA op failed:", exc)
+    print(
+        "\nThis usually means the torch build has no kernels for this GPU. "
+        f"{name} needs a build whose arch list includes sm_{cap[0]}{cap[1]}."
+    )
+    sys.exit(1)
+print("CUDA matmul OK")
 PY
 
 say "Installing manudata-qc-render"
