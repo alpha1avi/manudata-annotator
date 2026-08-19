@@ -445,6 +445,43 @@ def test_parse_shard_rejects_invalid(text):
         _parse_shard(text)
 
 
+def test_doctor_flags_unlabelled_manifest(tmp_path):
+    from qc.doctor import FAIL, PASS, check_manifest
+
+    manifest = tmp_path / "manifest.csv"
+    manifest.write_text(
+        "filename,site,task,notes\na.mp4,Alpine VL,wire harness,\nb.mp4,Alpine VL,,\n",
+        encoding="utf-8",
+    )
+    videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+
+    assert check_manifest(manifest, videos).status == FAIL
+    assert check_manifest(manifest, [videos[0]]).status == PASS
+
+
+def test_doctor_flags_missing_manifest_row(tmp_path):
+    from qc.doctor import FAIL, check_manifest
+
+    manifest = tmp_path / "manifest.csv"
+    manifest.write_text("filename,site,task\na.mp4,Alpine VL,wire harness\n",
+                        encoding="utf-8")
+    check = check_manifest(manifest, [tmp_path / "a.mp4", tmp_path / "unknown.mp4"])
+    assert check.status == FAIL
+    assert "unknown.mp4" in check.detail
+
+
+def test_doctor_report_exits_nonzero_only_on_failures():
+    from qc.doctor import FAIL, PASS, WARN, Check, format_report
+
+    clean = [Check("a", PASS), Check("b", WARN, "slower")]
+    assert not any(c.failed for c in clean)
+    assert "Ready, with 1 warning" in format_report(clean)
+
+    broken = clean + [Check("c", FAIL, "no CUDA")]
+    assert any(c.failed for c in broken)
+    assert "1 blocking problem" in format_report(broken)
+
+
 def test_fingerprint_changes_with_render_affecting_settings():
     base = RenderConfig()
     assert base.fingerprint() == RenderConfig().fingerprint()

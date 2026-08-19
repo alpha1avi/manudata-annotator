@@ -25,6 +25,7 @@ from typing import List, Optional, Sequence
 
 from qc import __version__
 from qc.config import REEL_CLIP_COUNT, RenderConfig
+from qc.doctor import format_report, run_checks
 from qc.io.video_reader import FrameWindow, discover_videos, probe
 from qc.logging_setup import setup as setup_logging
 from qc.manifest import DEFAULT_MANIFEST_NAME, ManifestError
@@ -83,6 +84,24 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Video files or directories to scan.")
     init.add_argument("--out", type=Path, required=True,
                       help=f"Manifest path to write (e.g. E:/manudata_qc/{DEFAULT_MANIFEST_NAME}).")
+
+    doctor = sub.add_parser(
+        "doctor",
+        help="Preflight: check GPU, weights, videos, manifest and disk before "
+             "spending GPU hours.",
+    )
+    doctor.add_argument("inputs", nargs="+", type=Path,
+                        help="Video files or directories to check.")
+    doctor.add_argument("--out", type=Path, required=True,
+                        help="Output directory (checked for free space).")
+    doctor.add_argument("--manifest", type=Path, default=None,
+                        help=f"Manifest CSV (default: <out>/{DEFAULT_MANIFEST_NAME}).")
+    doctor.add_argument("--wilor-weights", type=Path, default=Path("pretrained_models"))
+    doctor.add_argument("--pose-backend", choices=("wilor", "cached"), default="wilor")
+    doctor.add_argument("--workers", type=int, default=1)
+    doctor.add_argument("--encoder", choices=("auto", "nvenc", "x264"), default="auto")
+    doctor.add_argument("--max-size-mb", type=float, default=0.0)
+    doctor.add_argument("--limit", type=int, default=None)
 
     run = sub.add_parser("run", help="Analyse and render.")
     run.add_argument("inputs", nargs="+", type=Path,
@@ -169,6 +188,30 @@ def cmd_init_manifest(args: argparse.Namespace) -> int:
         print("Every row is labelled from the filename convention. Run:")
     print(f"  manudata-qc-render run <dirs...> --out {args.out.parent}")
     return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    setup_logging(None)
+    out_dir = Path(args.out)
+    manifest_path = (
+        Path(args.manifest) if args.manifest else out_dir / DEFAULT_MANIFEST_NAME
+    )
+    cfg = RenderConfig(
+        max_size_mb=args.max_size_mb or None,
+        encoder=args.encoder,
+        pose_backend=args.pose_backend,
+    )
+    checks = run_checks(
+        inputs=args.inputs,
+        out_dir=out_dir,
+        manifest_path=manifest_path,
+        cfg=cfg,
+        workers=max(1, args.workers),
+        weights_dir=Path(args.wilor_weights),
+        limit=args.limit,
+    )
+    print(format_report(checks))
+    return 1 if any(c.failed for c in checks) else 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -453,6 +496,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "init-manifest":
         return cmd_init_manifest(args)
+    if args.command == "doctor":
+        return cmd_doctor(args)
     if args.command == "run":
         return cmd_run(args)
     return 2
