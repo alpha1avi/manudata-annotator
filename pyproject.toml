@@ -8,13 +8,21 @@ version = "0.1.0"
 description = "Hand-pose QC render pipeline for ManuData egocentric manipulation data"
 requires-python = ">=3.10"
 
-# Pinned exactly: these are the versions the tool was developed and
-# tested against. The render path deliberately needs no GPU and no torch,
-# so a workstation can re-render from cached keypoints with just these.
+# Ranges, not exact pins.
+#
+# These were originally pinned to the exact versions used in development
+# (numpy 2.4.6, opencv 5.0.0.93 on Python 3.11). That broke immediately on
+# a rented box running Python 3.10, where those versions do not exist — a
+# pin that cannot install is worse than no pin at all. The ranges below are
+# wide enough to resolve on 3.10 through 3.13 and narrow enough to exclude
+# the next major version of each.
+#
+# Tested against: numpy 2.4.6, opencv-python-headless 5.0.0.93, tqdm 4.70.0.
+# The APIs used are long-stable, so older versions in range are fine.
 dependencies = [
-    "numpy==2.4.6",
-    "opencv-python-headless==5.0.0.93",
-    "tqdm==4.70.0",
+    "numpy>=1.24,<3",
+    "opencv-python-headless>=4.8,<6",
+    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
@@ -34,7 +42,7 @@ wilor = [
     "ultralytics==8.3.40",
 ]
 dev = [
-    "pytest==9.1.1",
+    "pytest>=7.4",
 ]
 
 [project.scripts]
