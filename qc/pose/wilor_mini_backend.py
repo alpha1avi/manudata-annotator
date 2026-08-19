@@ -43,6 +43,7 @@ the score survives into ``conf``/``det_conf``.
 from __future__ import annotations
 
 import logging
+import math
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +59,22 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DET_THRESHOLD = 0.30
 DEFAULT_RESCALE_FACTOR = 2.5   # WiLoR-mini's own default crop padding
+
+# WiLoR estimates a hand's *shape* metrically but its absolute *depth* is
+# unobservable from one image — the model resolves that ambiguity with a
+# fixed nominal focal length (5000 px at a 256 px crop). Scaled to a 1920 px
+# frame that is 37500 px, tens of times a real action-camera focal, which
+# places the hand at ~12 m instead of arm's length and makes the delivered
+# `kp3d` depths physically wrong.
+#
+# We have no calibration for these SJCAM cap cameras, so we assume a
+# horizontal field of view and derive a focal from it. Depth scales linearly
+# with focal and the 2D projection is invariant to it, so rescaling z by
+# focal_assumed / focal_nominal makes `kp3d` plausible (~0.5 m, arm's length)
+# and shrinks the per-frame depth jitter by the same factor, without moving a
+# single 2D keypoint. This is an *assumption*, recorded in the track meta and
+# stated in README_FOR_CUSTOMER; intra-hand geometry stays exactly metric.
+DEFAULT_ASSUMED_HFOV_DEG = 65.0
 
 
 class WiLoRMiniUnavailable(RuntimeError):
@@ -118,12 +135,14 @@ class WiLoRMiniBackend:
         device: Optional[str] = None,
         det_threshold: float = DEFAULT_DET_THRESHOLD,
         rescale_factor: float = DEFAULT_RESCALE_FACTOR,
+        assumed_hfov_deg: float = DEFAULT_ASSUMED_HFOV_DEG,
         use_fp16: bool = True,
     ) -> None:
         self.paths = WiLoRMiniPaths.under(weights_dir)
         self.paths.check()
         self.det_threshold = det_threshold
         self.rescale_factor = rescale_factor
+        self.assumed_hfov_deg = assumed_hfov_deg
 
         self._torch = _import_torch()
         self.device = device or ("cuda" if self._torch.cuda.is_available() else "cpu")
@@ -192,6 +211,8 @@ class WiLoRMiniBackend:
         track = PoseTrack.empty(meta.n_frames)
         seen = 0
 
+        self._prepare_depth_scale(meta)
+
         for index, frame in iter_frames(meta):
             seen = index + 1
             if index >= track.n_frames:
@@ -211,7 +232,44 @@ class WiLoRMiniBackend:
             "yolo_detection_score (WiLoR-mini exposes no pose confidence; "
             "hand_visible == valid)"
         )
+        # Absolute-depth calibration — see _prepare_depth_scale and the module
+        # header. Recorded so the render, report and README can be honest that
+        # depth rests on an assumed field of view, not a measured one.
+        track.meta["absolute_depth_calibrated"] = False
+        track.meta["assumed_hfov_deg"] = self.assumed_hfov_deg
+        track.meta["wilor_nominal_focal_px"] = self._focal_nominal_px
+        track.meta["depth_scale_applied"] = self._depth_scale
+        # Names the customer README documents: the focal/principal point the
+        # delivered kp3d is consistent with (the assumed-FOV focal, not the
+        # nominal one).
+        track.meta["focal_length_px"] = self._focal_assumed_px
+        track.meta["principal_point_px"] = [meta.width / 2.0, meta.height / 2.0]
         return track
+
+    def _prepare_depth_scale(self, meta: VideoMeta) -> None:
+        """Factor to rescale WiLoR's nominal-focal depth to an assumed FOV.
+
+        WiLoR's ``pred_cam_t_full`` depth is ``2 * focal / (box_size * s)``,
+        linear in the focal length; its x/y are focal-invariant. So one
+        multiplier on z alone converts the nominal-focal translation to our
+        assumed-focal one, and the 2D projection (already computed by the
+        pipeline) is untouched.
+        """
+        long_edge = max(meta.width, meta.height)
+        self._focal_nominal_px = float(
+            self._pipe.FOCAL_LENGTH / self._pipe.IMAGE_SIZE * long_edge
+        )
+        # Horizontal FOV over the frame width gives the assumed focal.
+        self._focal_assumed_px = float(
+            (meta.width / 2.0) / math.tan(math.radians(self.assumed_hfov_deg / 2.0))
+        )
+        self._depth_scale = self._focal_assumed_px / self._focal_nominal_px
+        logger.info(
+            "Depth rescale: assumed HFOV %.0f deg -> focal %.0f px (nominal %.0f px), "
+            "z x %.4f. Absolute depth is an assumption, not a calibration.",
+            self.assumed_hfov_deg, self._focal_assumed_px,
+            self._focal_nominal_px, self._depth_scale,
+        )
 
     def _infer_frame(self, track: PoseTrack, index: int, rgb: np.ndarray) -> None:
         detections = self._detect(rgb)
@@ -229,7 +287,10 @@ class WiLoRMiniBackend:
         for slot, pred in zip(slots, preds):
             wp = pred["wilor_preds"]
             kp3d_rel = np.asarray(wp["pred_keypoints_3d"][0], np.float32)  # (21,3)
-            cam_t = np.asarray(wp["pred_cam_t_full"][0], np.float32)       # (3,)
+            cam_t = np.asarray(wp["pred_cam_t_full"][0], np.float32).copy()  # (3,)
+            # Rescale depth from WiLoR's nominal focal to the assumed FOV.
+            # Only z is focal-dependent; x/y are invariant. 2D is untouched.
+            cam_t[2] *= self._depth_scale
             if kp3d_rel.shape[0] != N_JOINTS:
                 raise WiLoRMiniUnavailable(
                     f"WiLoR-mini returned {kp3d_rel.shape[0]} joints, expected "

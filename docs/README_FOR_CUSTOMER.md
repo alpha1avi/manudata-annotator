@@ -10,10 +10,19 @@ visibility flags that ship with every frame.
 
 | | |
 |---|---|
-| Hand detection | YOLO hand detector bundled with WiLoR |
-| Pose regression | **WiLoR** (ViT-based 3D hand pose), 21 joints per hand |
+| Hand detection | YOLO hand detector bundled with WiLoR-mini |
+| Pose regression | **WiLoR-mini** (ViT-based 3D hand pose), 21 joints per hand |
 | Joint convention | MANO / OpenPose 21-joint hand ordering |
 | Max hands per frame | 2 (one left, one right) |
+
+Two properties of this backend shape how the numbers below must be read;
+both are stated where they matter and summarised here so nothing is buried:
+
+- It exposes **no per-hand pose confidence** and never reports a pose
+  failure, so "hand visible but pose not recovered" cannot be measured —
+  see *The visibility flags*.
+- It carries **no camera calibration**, so absolute depth rests on an
+  assumed field of view — see *Camera intrinsics*.
 
 The exact checkpoint identifier and package version used for a given
 delivery are recorded in the `meta` block of every `.npz` keypoint file
@@ -49,17 +58,24 @@ These are cap-mounted cameras on a factory floor and we do **not** have
 per-unit calibrated intrinsics for them. Rather than imply a precision we
 do not have, we state the assumption plainly:
 
-- The pose model is applied with its **nominal training focal length**,
-  scaled to the source frame's long edge, with the principal point taken
-  as the image centre.
-- The focal length and principal point actually used are written into
-  every `.npz` as `focal_length_px` and `principal_point_px`.
+- WiLoR resolves the inherent monocular depth ambiguity with a fixed
+  nominal focal length. Left as-is that places the hands at ~12 m, which is
+  physically wrong for arm's-length footage, so we rescale depth to a
+  plausible **assumed horizontal field of view** (default 65°, giving
+  hands at roughly arm's length). Depth is linear in focal length and the
+  2D projection is invariant to it, so this corrects the depth **scale**
+  without moving a single 2D keypoint.
+- The assumed FOV, the focal length and principal point used, and the flag
+  `absolute_depth_calibrated=False` are written into every `.npz`
+  (`assumed_hfov_deg`, `focal_length_px`, `principal_point_px`).
 
 The consequence: **relative** 3D geometry — finger articulation, grasp
-aperture, hand-to-hand distance — is well conditioned, while **absolute**
-depth carries the scale error of the assumed focal length. If you intend
-to use absolute metric depth, calibrate against a known object in the
-scene, or tell us and we will run a calibration pass on the capture rig.
+aperture, and the in-frame hand-to-hand separation — is well conditioned,
+while the **absolute** depth of a hand from the camera is an assumption,
+not a measurement, and the front-to-back offset between the two hands
+inherits that same uncertainty. If you intend to use absolute metric
+depth, calibrate against a known object in the scene, or tell us the
+camera's true field of view and we will re-run with it.
 
 ## The visibility flags — please filter on these
 
@@ -84,6 +100,18 @@ Missing keypoints are always `NaN`, never zero or a held-over value, so
 `np.isnan` is a safe test and no interpolated value can be mistaken for a
 measurement.
 
+> **Important for this delivery.** The WiLoR-mini backend used here has no
+> per-hand pose confidence and never reports a pose failure: every detected
+> hand is given a pose. State 2 above (`hand_visible=1, valid=0`) therefore
+> **cannot occur** with this backend, and `hand_visible` is set **equal to**
+> `valid` for every hand. The machine-readable marker is
+> `pose_recovery_measurable=False` in the `.npz` `meta` block. The practical
+> effect: we can measure *whether a hand was detected*, but not *whether we
+> failed to pose a detected hand* — so "tracked" and "detected" are the same
+> event in this data, and the recovery figure below is not a measured
+> accuracy. This is a limitation of the current backend, called out so the
+> number is not mistaken for one it cannot be.
+
 ### Occlusion is an expected property of this data
 
 These are real assembly and finishing operations on an operating factory
@@ -97,19 +125,27 @@ That is why we report the two cases separately. Collapsing them into a
 single "missing data rate" would describe the factory and the tracker with
 one number that measures neither.
 
-### The figure that measures our tracking
+### Pose-recovery rate — and why it is not the headline for this delivery
 
 > **Pose-recovery rate = recovered poses ÷ hand-slots where a hand was
 > visible.**
 
-This is `pose_recovery_pct` in `qc_report.csv`, it is burned into the
-header band of every rendered frame, and it is what the video ranking
-sorts on. It is computed strictly over frames where the detector found a
-hand, so occlusion neither flatters nor penalises it.
+This is `pose_recovery_pct` in `qc_report.csv`, and it is designed to be
+the measure of our tracker: computed strictly over slots where a hand was
+detected, so occlusion neither flatters nor penalises it.
 
-`occluded_or_absent_pct` is reported alongside it as a property of the
-footage. Both are per-video in the CSV, and the portfolio-wide figures
-are printed at the end of the ranked summary.
+**With the WiLoR-mini backend it is structurally 100%.** As noted above,
+the regressor poses every detected hand, so recovered always equals
+visible. A 100% here reflects the model's behaviour — it always returns a
+pose — **not** a measured accuracy, and it should not be read as one. It
+stays in the CSV and the header for continuity and because it becomes a
+real measurement the moment a backend with a pose-failure signal is used;
+until then, treat `pose_recovery_measurable=False` as the caveat that
+travels with it. What *is* honestly measured here is **detection
+coverage** — `occluded_or_absent_pct`, the share of hand-slots with no
+hand in view — reported alongside it as a property of the footage. Both
+are per-video in the CSV, with portfolio-wide figures at the end of the
+ranked summary.
 
 ## Reading the QC videos
 
@@ -168,11 +204,16 @@ video, so the rate is undefined rather than zero.
 
 ## Questions we expect
 
-**Why is `pose_recovery_pct` not 100%?** Motion blur at 60 fps under
-factory lighting, partial occlusion where enough of the hand is visible to
-detect but not to articulate, and extreme grasp poses against the
-workpiece. These are the cases we are actively working on, and they are
-visible in the renders rather than filtered out of them.
+**Why is `pose_recovery_pct` exactly 100%?** Because the current backend
+(WiLoR-mini) poses every hand it detects and has no way to report a pose
+failure, so the recovered-over-visible ratio is 100% by construction, not
+by measured perfection. See *Pose-recovery rate* above and the
+`pose_recovery_measurable=False` flag in each `.npz`. A backend that scores
+or rejects individual poses would turn this back into a real quality
+number; the cases such a number would expose — motion blur, partial
+occlusion detectable but not articulable, extreme grasps against the
+workpiece — are still present in the footage and visible in the renders,
+they are simply not counted against the tracker today.
 
 **Can we get the frames you dropped?** Nothing is dropped. Every frame of
 every source video has a row in the keypoint arrays, flagged as described

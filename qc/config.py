@@ -107,8 +107,10 @@ TEXT_LOST = (120, 120, 200)
 ORBIT_DEG_PER_SEC = 15.0
 VIEW_ELEV_DEG = 16.0
 # Half-extent of the view cube in metres.  FIXED — never autoscale per
-# frame, that is what makes a 3D panel jitter.
-VIEW_HALF_EXTENT_M = 0.16
+# frame, that is what makes a 3D panel jitter.  Sized to hold both hands at
+# their true separation (~0.15 m median, up to ~0.4 m) plus a hand's own
+# reach; a single hand centred in it is still large and legible.
+VIEW_HALF_EXTENT_M = 0.35
 GROUND_GRID_DIVS = 8
 
 # ── visibility / gap handling ─────────────────────────────────────────
