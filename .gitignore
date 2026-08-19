@@ -11,6 +11,7 @@ build/
 .venv/
 venv/
 env/
+.venv-*/
 
 # IDE
 .vscode/
@@ -29,8 +30,19 @@ Thumbs.db
 *.pt
 *.pth
 *.onnx
+*.ckpt
 checkpoints/
 weights/
+pretrained_models/
+
+# QC render outputs and keypoint caches
+qc_out/
+renders/
+reel_clips/
+keypoints/
+qc_report.csv
+manudata_qc_reel.mp4
+*.done.json
 
 # Outputs
 output/

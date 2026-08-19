@@ -1,0 +1,1 @@
+"""Panel drawing and compositing."""

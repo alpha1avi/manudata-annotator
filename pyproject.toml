@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manudata-qc-render"
+version = "0.1.0"
+description = "Hand-pose QC render pipeline for ManuData egocentric manipulation data"
+requires-python = ">=3.10"
+
+# Pinned exactly: these are the versions the tool was developed and
+# tested against. The render path deliberately needs no GPU and no torch,
+# so a workstation can re-render from cached keypoints with just these.
+dependencies = [
+    "numpy==2.4.6",
+    "opencv-python-headless==5.0.0.93",
+    "tqdm==4.70.0",
+]
+
+[project.optional-dependencies]
+# WiLoR inference. Install torch from the index matching the instance's
+# CUDA runtime first — see VAST_SETUP.md; a mismatch here wastes more
+# rental time than anything else in the setup.
+wilor = [
+    "torch==2.5.1",
+    "torchvision==0.20.1",
+    "ultralytics==8.3.40",
+]
+dev = [
+    "pytest==9.1.1",
+]
+
+[project.scripts]
+manudata-qc-render = "qc.cli:main"
+
+[tool.setuptools]
+packages = [
+    "qc",
+    "qc.io",
+    "qc.pose",
+    "qc.render",
+    "qc.report",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
