@@ -127,8 +127,18 @@ def cmd_init_manifest(args: argparse.Namespace) -> int:
                      ", ".join(str(p) for p in args.inputs))
         return 2
     init_manifest(videos, args.out)
+
+    labels = load_manifest(args.out)
+    blank = [name for name, label in labels.items() if not label.task]
+
     print(f"\nWrote {args.out} with {len(videos)} rows.")
-    print("Fill in the 'task' column, then run:")
+    if blank:
+        print(f"{len(blank)} row(s) need a 'task' before rendering, starting with:")
+        for name in sorted(blank)[:5]:
+            print(f"  {name}")
+        print("\nFill those in, then run:")
+    else:
+        print("Every row is labelled from the filename convention. Run:")
     print(f"  manudata-qc-render run <dirs...> --out {args.out.parent}")
     return 0
 

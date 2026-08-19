@@ -19,10 +19,16 @@ minutes instead of three hours.
 | CUDA | 12.1 (match the torch build in step 3) |
 
 **Why the CPU spec matters.** The GPU only runs WiLoR inference. Frame
-compositing and H.264 encoding are CPU work, measured at **~11.5 ms per
-1080p frame per core** for the two-panel layout. On a 4-core box the CPU
-becomes the bottleneck and the GPU idles while you pay for it. Filter
-Vast.ai listings on cores, not just GPU model.
+compositing and H.264 encoding are CPU work. Measured on a 1080p60
+source, two-panel layout: **~19 ms/frame to composite**, and **~63
+ms/frame for the whole decode → composite → encode loop** (≈16 fps).
+On a 4-core box the CPU becomes the bottleneck and the GPU idles while
+you pay for it. Filter Vast.ai listings on cores, not just GPU model.
+
+Note the tool renders **one video at a time**, and compositing is
+single-threaded (x264 does use multiple threads). Extra cores therefore
+help the encoder more than the compositor — see the time budget in
+step 11 before assuming a 32-core box finishes proportionally faster.
 
 Sort listings by `$/hr` among instances meeting the above; a 4090 with 16
 cores is usually better value here than an A100 with 8.
@@ -243,22 +249,41 @@ re-render on a laptop with `--pose-backend cached` (no GPU, no torch).
 
 ## 11. Rough time budget
 
-For 25 videos averaging 5 minutes at 1080p60 (~450 000 frames):
+For 25 videos averaging 5 minutes at 1080p60 — about **450 000 frames**.
 
-| Stage | Rate | Estimate |
+Measured end to end on a 1080p60 source (decode → composite → libx264,
+sequential, one video at a time):
+
+| Stage | Measured | 450 k frames |
 |---|---|---|
-| WiLoR inference | GPU-bound, batched | benchmark it during the smoke test |
-| Compositing | ~11.5 ms/frame/core | ~1.5 h on 12 cores |
-| H.264 encode | NVENC, parallel with the above | negligible |
+| Composite only | 18.8 ms/frame (53 fps) | ~2.3 h |
+| Full render loop | 63 ms/frame (15.9 fps) | **~7.9 h** |
+| WiLoR inference | not measured — no GPU available where this was built | benchmark in the smoke test |
+
+**Read that 7.9 h as a ceiling, not a target.** It is single-video,
+sequential, with a software encoder on a shared CPU. NVENC removes most
+of the encode term, and a dedicated many-core box will beat it. But do
+not assume cores divide it: the tool does not render videos in parallel.
+
+So the honest planning advice is to **not render everything**:
+
+```bash
+# 1. Analyse only — cheap, and tells you what is worth rendering
+manudata-qc-render run ... --analyze-only
+
+# 2. Render only what you will actually send
+manudata-qc-render run ... --top 8 --clips-only
+```
+
+Eight 25-second clips is ~12 000 frames against 450 000 — about **13
+minutes** instead of eight hours, for the footage that actually goes in
+the customer reel. Render full-length videos only for the ones you have
+a specific reason to ship whole.
 
 Inference is the term to measure rather than trust a table for — it swings
 with how many hands are actually in frame. The smoke test prints frames
 per second for one video; multiply that out before committing to the
 batch.
-
-To cut cost: run `--analyze-only` first, then render only what you will
-actually send with `--top N --clips-only`. Rendering 8 clips of 25 s
-instead of 25 full videos is roughly a twentieth of the compositing time.
 
 ## Troubleshooting
 

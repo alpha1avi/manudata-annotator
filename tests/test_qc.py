@@ -302,6 +302,38 @@ def test_unknown_video_is_rejected():
         resolve(__import__("pathlib").Path("missing.mp4"), {})
 
 
+def test_filename_convention_yields_both_labels():
+    """Country_City_Site_Task_NNN_NNN fills the manifest with no typing."""
+    from qc.manifest import parse_filename
+
+    label = parse_filename("India_Faridabad_AlpineFootwear01_ShoeAssembly_003_039")
+    assert label is not None
+    assert label.site == "Alpine Footwear 01"
+    assert label.task == "shoe assembly"
+    assert "Faridabad" in label.notes and "India" in label.notes
+
+
+@pytest.mark.parametrize("stem", [
+    "Cam01_2026_0526_143513_014",   # raw camera name: 'Cam01' is not alphabetic
+    "2026_0509_154309_010",         # all numeric
+    "random_name",                  # too few tokens
+    "India_Faridabad_Site_Task",    # no trailing clip numbers
+])
+def test_off_convention_names_are_not_guessed(stem):
+    """Better a blank task than a confidently wrong one on a customer frame."""
+    from qc.manifest import parse_filename
+
+    assert parse_filename(stem) is None
+
+
+def test_split_camel():
+    from qc.manifest import split_camel
+
+    assert split_camel("AlpineFootwear01") == "Alpine Footwear 01"
+    assert split_camel("ShoeAssembly") == "Shoe Assembly"
+    assert split_camel("PCBSolder") == "PCB Solder"
+
+
 def test_prettify_site_uppercases_initialisms():
     assert prettify_site("tangerine shoes vl") == "Tangerine Shoes VL"
     assert prettify_site("alpine Vl") == "Alpine VL"

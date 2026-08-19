@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -33,6 +34,45 @@ class Label:
     site: str
     task: str
     notes: str = ""
+
+
+def split_camel(token: str) -> str:
+    """``AlpineFootwear01`` -> ``Alpine Footwear 01``."""
+    parts = re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|\d+|[A-Z]+", token)
+    return " ".join(parts) if parts else token
+
+
+def parse_filename(stem: str) -> Optional[Label]:
+    """Read site and task out of a structured capture filename.
+
+    Recognises the delivery convention
+    ``Country_City_Site_Task_NNN_NNN``, e.g.::
+
+        India_Faridabad_AlpineFootwear01_ShoeAssembly_003_039
+                        ^site            ^task
+
+    Returns ``None`` for anything that does not clearly match, so an
+    off-convention name falls back to folder-derived site and a blank
+    task rather than silently inventing a label. The trailing numeric
+    tokens are required precisely because they are what distinguishes
+    this convention from an arbitrary underscore-separated name.
+    """
+    tokens = [t for t in stem.split("_") if t]
+    if len(tokens) < 5:
+        return None
+
+    country, city, site, task = tokens[0], tokens[1], tokens[2], tokens[3]
+    trailing = tokens[4:]
+    if not trailing or not all(t.isdigit() for t in trailing):
+        return None
+    if not (country.isalpha() and city.replace("-", "").isalpha()):
+        return None
+
+    return Label(
+        site=split_camel(site),
+        task=split_camel(task).lower(),
+        notes=f"{split_camel(city)}, {split_camel(country)} · clip {'-'.join(trailing)}",
+    )
 
 
 def prettify_site(raw: str) -> str:
@@ -133,6 +173,7 @@ def init(video_paths: Iterable[Path], out_path: Path, root: Optional[Path] = Non
 
     rows = []
     added = 0
+    parsed_rows = 0
     for path in video_paths:
         path = Path(path)
         key = path.name.lower()
@@ -144,12 +185,22 @@ def init(video_paths: Iterable[Path], out_path: Path, root: Optional[Path] = Non
             })
             continue
         added += 1
-        rows.append({
-            "filename": path.name,
-            "site": prettify_site(path.parent.name),
-            "task": "",
-            "notes": "",
-        })
+        # A structured capture filename carries both labels; fall back to
+        # the folder name for site and leave task for a human otherwise.
+        parsed = parse_filename(path.stem)
+        if parsed is not None:
+            parsed_rows += 1
+            rows.append({
+                "filename": path.name, "site": parsed.site,
+                "task": parsed.task, "notes": parsed.notes,
+            })
+        else:
+            rows.append({
+                "filename": path.name,
+                "site": prettify_site(path.parent.name),
+                "task": "",
+                "notes": "",
+            })
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_name(out_path.name + ".tmp")
@@ -159,8 +210,14 @@ def init(video_paths: Iterable[Path], out_path: Path, root: Optional[Path] = Non
         writer.writerows(rows)
     tmp.replace(out_path)
 
+    blank_tasks = sum(1 for r in rows if not r["task"])
     logger.info(
-        "Wrote %s: %d rows (%d new). Fill in the task column before rendering.",
-        out_path, len(rows), added,
+        "Wrote %s: %d rows (%d new, %d labelled from the filename convention).",
+        out_path, len(rows), added, parsed_rows,
     )
+    if blank_tasks:
+        logger.warning(
+            "%d row(s) still have a blank task and will not render until it is "
+            "filled in.", blank_tasks,
+        )
     return out_path
