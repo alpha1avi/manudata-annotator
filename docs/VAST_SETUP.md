@@ -7,6 +7,38 @@ minutes instead of three hours.
 
 ---
 
+## 0. Getting an agent onto the pod
+
+A Claude Code session running in Anthropic's cloud **cannot reach your
+Vast.ai pod**. That environment has no SSH client, raw outbound TCP is
+blocked, and `vast.ai` is not on its network allowlist — so there is no
+tunnel to open and nothing to configure. Verified, not assumed.
+
+The working arrangement is the other way round: **run Claude Code on the
+pod**, where the GPU, the weights and the footage all are.
+
+```bash
+# On the pod, after the bootstrap in step 2:
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y nodejs
+npm install -g @anthropic-ai/claude-code
+
+cd /workspace/manudata-annotator
+claude          # authenticate once, then work in-repo with local GPU access
+```
+
+That session can run inference, inspect renders, and fix things in place.
+A cloud session (like the one that wrote this) is still useful for editing
+code and pushing commits the pod pulls — it just cannot execute anything
+on the pod.
+
+**Getting a video to a cloud Claude session.** If you want a cloud session
+to work on real frames, Google Drive links will not work (blocked), but
+**GitHub release assets are reachable** and take files up to 2 GB. Attach
+a clip to a release on this repo and share the download URL. Note the
+cloud session still has no GPU, so it can validate decode, analysis and
+rendering on real footage — not WiLoR inference.
+
 ## 1. Instance to rent
 
 | | |
@@ -33,7 +65,27 @@ step 11 before assuming a 32-core box finishes proportionally faster.
 Sort listings by `$/hr` among instances meeting the above; a 4090 with 16
 cores is usually better value here than an A100 with 8.
 
-## 2. Base system packages
+## 2. One-command setup
+
+Steps 3 and 4 are automated. On a fresh instance:
+
+```bash
+bash <(curl -sSL https://raw.githubusercontent.com/alpha1avi/manudata-annotator/claude/manudata-hand-pose-qc-jqn3a8/scripts/vast_bootstrap.sh)
+```
+
+It installs ffmpeg and the repo, picks the torch build matching the
+instance's driver (cu121 or cu118), **verifies `torch.cuda.is_available()`
+and stops if it is False**, installs WiLoR, fetches the weights, runs the
+unit tests, and reports whether NVENC is usable. It is idempotent — re-run
+it after a failure or an instance restart.
+
+If it reports missing weight files, fetch those three by hand (the
+upstream location moves between releases) and re-run. Everything else
+will already be in place.
+
+The manual equivalent is steps 3–4 below.
+
+## 2b. Base system packages
 
 ```bash
 apt-get update && apt-get install -y ffmpeg git wget
