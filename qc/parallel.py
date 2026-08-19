@@ -38,26 +38,36 @@ _BACKEND = None
 class BackendSpec:
     """Everything needed to build a pose backend inside a worker."""
 
-    kind: str  # "wilor" or "cached"
+    kind: str  # "wilor", "wilor_mini" or "cached"
     weights_dir: Optional[Path] = None
     device: Optional[str] = None
     batch_size: int = 8
 
     def build(self):
-        if self.kind != "wilor":
-            return None
-        from qc.pose.wilor_backend import WiLoRBackend
+        if self.kind == "wilor":
+            from qc.pose.wilor_backend import WiLoRBackend
 
-        return WiLoRBackend(
-            weights_dir=self.weights_dir,
-            device=self.device,
-            batch_size=self.batch_size,
-        )
+            return WiLoRBackend(
+                weights_dir=self.weights_dir,
+                device=self.device,
+                batch_size=self.batch_size,
+            )
+        if self.kind == "wilor_mini":
+            from qc.pose.wilor_mini_backend import WiLoRMiniBackend
+
+            return WiLoRMiniBackend(
+                weights_dir=self.weights_dir,
+                device=self.device,
+            )
+        return None
+
+
+_MODEL_BACKENDS = ("wilor", "wilor_mini")
 
 
 def _backend_for(spec: Optional[BackendSpec]):
     global _BACKEND
-    if spec is None or spec.kind != "wilor":
+    if spec is None or spec.kind not in _MODEL_BACKENDS:
         return None
     if _BACKEND is None:
         _BACKEND = spec.build()

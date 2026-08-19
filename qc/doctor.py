@@ -103,7 +103,7 @@ def check_encoder(preference: str) -> tuple:
 
 
 def check_torch(pose_backend: str, workers: int) -> List[Check]:
-    if pose_backend != "wilor":
+    if pose_backend not in ("wilor", "wilor_mini"):
         return [Check("torch / CUDA", PASS, "not needed for --pose-backend cached")]
 
     try:
@@ -145,10 +145,20 @@ def check_torch(pose_backend: str, workers: int) -> List[Check]:
 
 
 def check_weights(weights_dir: Optional[Path], pose_backend: str) -> Check:
-    if pose_backend != "wilor":
+    if pose_backend not in ("wilor", "wilor_mini"):
         return Check("WiLoR weights", PASS, "not needed for --pose-backend cached")
     if weights_dir is None:
         return Check("WiLoR weights", FAIL, "--wilor-weights not given")
+
+    if pose_backend == "wilor_mini":
+        from qc.pose.wilor_mini_backend import WiLoRMiniPaths, WiLoRMiniUnavailable
+
+        try:
+            WiLoRMiniPaths.under(weights_dir).check()
+        except WiLoRMiniUnavailable as exc:
+            return Check("WiLoR weights", FAIL, str(exc).replace("\n", " ")[:200])
+        total = sum(p.stat().st_size for p in Path(weights_dir).glob("*") if p.is_file())
+        return Check("WiLoR weights", PASS, f"ckpt + detector present ({_fmt_gb(total)})")
 
     from qc.pose.wilor_backend import WiLoRPaths, WiLoRUnavailable
 

@@ -97,7 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--manifest", type=Path, default=None,
                         help=f"Manifest CSV (default: <out>/{DEFAULT_MANIFEST_NAME}).")
     doctor.add_argument("--wilor-weights", type=Path, default=Path("pretrained_models"))
-    doctor.add_argument("--pose-backend", choices=("wilor", "cached"), default="wilor")
+    doctor.add_argument("--pose-backend", choices=("wilor", "wilor_mini", "cached"),
+                        default="wilor")
     doctor.add_argument("--workers", type=int, default=1)
     doctor.add_argument("--encoder", choices=("auto", "nvenc", "x264"), default="auto")
     doctor.add_argument("--max-size-mb", type=float, default=0.0)
@@ -132,8 +133,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--reel-clips", type=int, default=REEL_CLIP_COUNT,
                      help=f"Clips in the reel (default: {REEL_CLIP_COUNT}).")
 
-    run.add_argument("--pose-backend", choices=("wilor", "cached"), default="wilor",
-                     help="Keypoint source. 'cached' requires existing .npz files.")
+    run.add_argument("--pose-backend", choices=("wilor", "wilor_mini", "cached"),
+                     default="wilor",
+                     help="Keypoint source. 'wilor_mini' is the installed WiLoR-mini "
+                          "library; 'cached' requires existing .npz files.")
     run.add_argument("--wilor-weights", type=Path, default=Path("pretrained_models"),
                      help="Directory holding the WiLoR checkpoint and detector.")
     run.add_argument("--keypoints-dir", type=Path, default=None,
@@ -261,9 +264,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     workers = max(1, args.workers)
 
     backend_spec = None
-    if args.pose_backend == "wilor":
+    if args.pose_backend in ("wilor", "wilor_mini"):
         backend_spec = BackendSpec(
-            kind="wilor", weights_dir=Path(args.wilor_weights),
+            kind=args.pose_backend, weights_dir=Path(args.wilor_weights),
             device=args.device, batch_size=args.batch_size,
         )
         # Validate the weight files without constructing the model. Building
@@ -363,6 +366,16 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def _wilor_weights_ok(args) -> bool:
+    if args.pose_backend == "wilor_mini":
+        from qc.pose.wilor_mini_backend import WiLoRMiniPaths, WiLoRMiniUnavailable
+
+        try:
+            WiLoRMiniPaths.under(Path(args.wilor_weights)).check()
+            return True
+        except WiLoRMiniUnavailable as exc:
+            logger.error("%s", exc)
+            return False
+
     from qc.pose.wilor_backend import WiLoRPaths, WiLoRUnavailable
 
     try:
