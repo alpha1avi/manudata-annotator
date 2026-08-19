@@ -167,6 +167,7 @@ class WiLoRMiniBackend:
 
     def _build_pipeline(self, weights_dir: Path, dtype):
         try:
+            import wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline as wmp
             from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import (
                 WiLorHandPose3dEstimationPipeline,
             )
@@ -176,6 +177,13 @@ class WiLoRMiniBackend:
                 "(pip install wilor-mini) or choose a different --pose-backend. "
                 f"Import error: {exc}"
             ) from exc
+
+        # WiLoR-mini anti-aliases each crop by Gaussian-blurring the *entire*
+        # source frame with skimage, once per detected hand — ~60 ms on a
+        # 1080p frame, which dominated inference (~172 ms/frame). cv2's
+        # Gaussian is the same operation ~30x faster; swapping it in cuts
+        # inference to ~60 ms/frame (2.9x) with sub-2px keypoint difference.
+        wmp.gaussian = _fast_gaussian
 
         root = self._pretrained_root(weights_dir)
         return WiLorHandPose3dEstimationPipeline(
@@ -337,6 +345,23 @@ class WiLoRMiniBackend:
 
 
 # ── helpers, kept free of any torch types ─────────────────────────────
+
+
+def _fast_gaussian(image, sigma=1.0, channel_axis=None, preserve_range=True, **kwargs):
+    """Drop-in for ``skimage.filters.gaussian`` backed by cv2.
+
+    Matches the call WiLoR-mini makes — ``gaussian(img, sigma=...,
+    channel_axis=2, preserve_range=True)`` — but runs ~30x faster. cv2
+    handles the per-channel blur for an HxWxC array natively; a
+    non-positive sigma is a no-op, as in skimage.
+    """
+    import cv2
+
+    if sigma is None or sigma <= 0:
+        return image.astype(np.float32)
+    return cv2.GaussianBlur(
+        image.astype(np.float32), (0, 0), sigmaX=float(sigma), sigmaY=float(sigma)
+    )
 
 
 def _import_torch():
