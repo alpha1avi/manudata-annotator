@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 #
-# One command, one video, start to downloadable output.
+# One command, one or more videos, start to downloadable output.
 #
 #     ./scripts/run_video.sh /workspace/videos/Some_Capture_001.mp4
+#     ./scripts/run_video.sh /workspace/videos/*.mp4 --workers 3
 #
-# Everything after the video path is passed through to `qc run`, so
-# `--workers 3`, `--assumed-hfov 78`, `--force-inference` and friends all
-# still work.
+# Videos come first, then flags, which pass through to `qc run` — so
+# `--workers 3`, `--assumed-hfov 78`, `--force-inference` all still work.
+#
+# Pass several videos at once when you want --workers to do anything:
+# one video is one worker's job by design (nothing about a video's
+# pipeline splits across processes, so there is no shared cursor to
+# desynchronise), which means parallelism comes from having more than
+# one video, never from a bigger --workers on a single one.
 #
 # This script exists because the pipeline itself was never the problem.
 # Every hour lost so far went to the surrounding process: code that was
@@ -62,14 +68,29 @@ fi
 
 # ── arguments ─────────────────────────────────────────────────────────
 
-if (( $# < 1 )); then
-    die "usage: $0 VIDEO [extra qc run flags...]"
+# Videos first, then flags. Several videos in one invocation is the only
+# way --workers buys anything: one video is one worker's job by design,
+# so parallelism comes from having more than one of them.
+VIDEOS=()
+while (( $# )) && [[ "$1" != -* ]]; do
+    [[ -f "$1" ]] || die "No such video: $1"
+    VIDEOS+=( "$1" )
+    shift
+done
+
+if (( ${#VIDEOS[@]} == 0 )); then
+    die "usage: $0 VIDEO [VIDEO...] [extra qc run flags...]
+
+   Pass several videos at once to make --workers N worth using —
+   one video is one worker's job, so a single video ignores it."
 fi
-VIDEO="$1"; shift
-[[ -f "$VIDEO" ]] || die "No such video: $VIDEO"
 
 STAMP=$(date +%Y%m%d-%H%M%S)
-LOG="$OUT/logs/run-$(basename "${VIDEO%.*}")-$STAMP.log"
+if (( ${#VIDEOS[@]} == 1 )); then
+    LOG="$OUT/logs/run-$(basename "${VIDEOS[0]%.*}")-$STAMP.log"
+else
+    LOG="$OUT/logs/run-batch${#VIDEOS[@]}-$STAMP.log"
+fi
 mkdir -p "$OUT/logs" "$OUT/keypoints"
 
 # ── 2. the checkout is current ────────────────────────────────────────
@@ -121,7 +142,8 @@ say "  $SMI"
 # Site and task are burned into every frame. A placeholder discovered
 # after the fact means re-rendering all 45,000 of them.
 
-say "Checking the site/task label"
+say "Checking the site/task labels"
+for VIDEO in "${VIDEOS[@]}"; do
 LABEL=$(python3 - "$VIDEO" "$OUT" <<'PY'
 import csv
 import sys
@@ -188,7 +210,8 @@ if [[ "$LABEL" == ERROR\|* ]]; then
    $OUT/manifest.csv with a real site and task."
 fi
 IFS='|' read -r _ SITE TASK <<<"$LABEL"
-say "  site=$SITE  task=$TASK"
+say "  $(basename "$VIDEO")  →  $SITE / $TASK"
+done
 
 # ── 5. run ────────────────────────────────────────────────────────────
 
@@ -206,45 +229,56 @@ echo
 # Archival render: no size cap. The cap exists to make a clip emailable
 # and would starve a 25-minute render of bitrate.
 say "Pass 1/2 — analysis and full render"
-python3 -m qc.cli run "$VIDEO" "${COMMON[@]}" --max-size-mb 0 "$@" 2>&1 | tee -a "$LOG"
+python3 -m qc.cli run "${VIDEOS[@]}" "${COMMON[@]}" --max-size-mb 0 "$@" 2>&1 | tee -a "$LOG"
 
 # Shippable reel: the recommended window only, capped. Reuses the cached
 # keypoints, so this is seconds of encoding rather than another pass.
 say "Pass 2/2 — recommended clip, under ${REEL_MAX_MB} MB"
-python3 -m qc.cli run "$VIDEO" "${COMMON[@]}" \
+python3 -m qc.cli run "${VIDEOS[@]}" "${COMMON[@]}" \
     --out "$OUT/reel" --clips-only --max-size-mb "$REEL_MAX_MB" "$@" 2>&1 | tee -a "$LOG"
 
 # ── 6. verify and stage ───────────────────────────────────────────────
 
 echo
 say "Verifying outputs"
-python3 - "$OUT" "$VIDEO" <<'PY'
+python3 - "$OUT" "${VIDEOS[@]}" <<'PY'
 import json, sys
 from pathlib import Path
 
-out, video = Path(sys.argv[1]), Path(sys.argv[2])
-stem = video.stem
+SIDECAR = ".done.json"
+out, videos = Path(sys.argv[1]), [Path(v) for v in sys.argv[2:]]
 ok = True
 
-npz = out / "keypoints" / f"{stem}.npz"
-if npz.exists():
-    print(f"  keypoints  {npz.name}  {npz.stat().st_size/1e6:.1f} MB")
-else:
-    print(f"  MISSING keypoints: {npz}"); ok = False
+for video in videos:
+    stem = video.stem
+    print(f"  {stem}")
 
-for label, root in (("render", out / "renders"), ("clip", out / "reel" / "renders")):
-    for side in sorted(root.glob(f"{stem}*.done.json")):
-        meta = json.loads(side.read_text())
-        mp4 = side.with_suffix("")
-        actual = mp4.stat().st_size if mp4.exists() else -1
-        match = "ok" if actual == meta.get("size_bytes") else "SIZE MISMATCH"
-        print(f"  {label:9} {mp4.name}  {meta['frames']} frames  "
-              f"{meta['size_mb']:.0f} MB  [{match}]")
-        if match != "ok":
-            ok = False
+    npz = out / "keypoints" / f"{stem}.npz"
+    if npz.exists():
+        print(f"     keypoints  {npz.stat().st_size/1e6:6.1f} MB")
     else:
-        if not list(root.glob(f"{stem}*.done.json")):
-            print(f"  no {label} produced")
+        print(f"     MISSING keypoints: {npz}")
+        ok = False
+
+    for kind, root in (("render", out / "renders"),
+                       ("clip", out / "reel" / "renders")):
+        sidecars = sorted(root.glob(f"{stem}*{SIDECAR}"))
+        if not sidecars:
+            print(f"     no {kind} produced")
+            continue
+        for side in sidecars:
+            meta = json.loads(side.read_text())
+            # The sidecar is "<name>.mp4.done.json"; with_suffix would
+            # strip only ".json" and leave a path that does not exist.
+            mp4 = Path(str(side)[: -len(SIDECAR)])
+            actual = mp4.stat().st_size if mp4.exists() else -1
+            # Byte size, not frame count: +faststart writes the index at
+            # the front, so a truncated MP4 still claims its full length.
+            good = actual == meta.get("size_bytes")
+            ok = ok and good
+            print(f"     {kind:7} {meta['frames']:>6} frames  "
+                  f"{meta['size_mb']:7.0f} MB  "
+                  f"[{'ok' if good else 'SIZE MISMATCH'}]  {mp4.name}")
 
 raise SystemExit(0 if ok else 1)
 PY
