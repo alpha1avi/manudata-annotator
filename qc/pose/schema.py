@@ -159,14 +159,20 @@ class PoseTrack:
 
     # ── persistence ───────────────────────────────────────────────────
 
-    def save(self, path: Path) -> None:
-        """Write atomically so a killed instance never leaves a torn .npz."""
+    def save(self, path: Path, compress: bool = True) -> None:
+        """Write atomically so a killed instance never leaves a torn .npz.
+
+        *compress* is worth its cost for delivered keypoints and not for
+        transient mid-inference checkpoints, which are rewritten every
+        couple of minutes and deleted on success.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         arrays = {name: getattr(self, name) for name in _ARRAY_SPEC}
+        writer = np.savez_compressed if compress else np.savez
         with open(tmp, "wb") as fh:
-            np.savez_compressed(fh, meta_json=np.array(_dumps(self.meta)), **arrays)
+            writer(fh, meta_json=np.array(_dumps(self.meta)), **arrays)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)

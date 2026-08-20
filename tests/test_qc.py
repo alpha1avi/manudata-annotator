@@ -498,3 +498,137 @@ def test_inference_progress_time_formatting():
     assert _human(2580) == "43m00s"
     assert _human(7860) == "2h11m"
     assert _human(float("inf")) == "unknown"
+
+
+# ── mid-inference checkpointing ───────────────────────────────────────
+#
+# The property under test is not "resume works" but "a resumed track is
+# indistinguishable from an uninterrupted one". A checkpoint that silently
+# mixes frames from two different parameter sets would produce a track that
+# passes every shape and consistency check and is wrong in half its frames.
+
+
+def _filled_track(n_frames: int, upto: int) -> PoseTrack:
+    """A track with frames [0, upto) populated and the rest missing."""
+    track = PoseTrack.empty(n_frames)
+    for i in range(upto):
+        track.kp3d[i, 0] = float(i)
+        track.kp2d[i, 0] = float(i)
+        track.conf[i, 0] = 0.9
+        track.det_conf[i, 0] = 0.9
+        track.hand_visible[i, 0] = True
+        track.valid[i, 0] = True
+    return track
+
+
+def test_checkpoint_round_trips_partial_work(tmp_path):
+    from qc.pose.checkpoint import InferenceCheckpoint
+
+    fp = {"backend": "WiLoR-mini", "assumed_hfov_deg": 65.0}
+    ckpt = InferenceCheckpoint(tmp_path / "v.npz.partial", fp, every=100)
+    ckpt.save(_filled_track(500, 300), done=300)
+
+    restored, start = InferenceCheckpoint(tmp_path / "v.npz.partial", fp).resume(500)
+    assert start == 300
+    assert restored is not None
+    assert restored.valid[:300, 0].all()
+    assert not restored.valid[300:, 0].any()
+    assert restored.kp3d[299, 0, 0, 0] == 299.0
+
+
+def test_checkpoint_saved_track_is_not_polluted_by_bookkeeping(tmp_path):
+    """The in-memory track must come out of save() exactly as it went in."""
+    from qc.pose.checkpoint import InferenceCheckpoint
+
+    track = _filled_track(50, 10)
+    track.meta["model"] = "WiLoR-mini"
+    ckpt = InferenceCheckpoint(tmp_path / "v.npz.partial", {"a": 1})
+    ckpt.save(track, done=10)
+
+    assert track.meta == {"model": "WiLoR-mini"}
+
+
+def test_checkpoint_refuses_a_partial_from_different_settings(tmp_path):
+    """Mixing depth scales would corrupt half a track plausibly. Refuse."""
+    from qc.pose.checkpoint import InferenceCheckpoint
+
+    path = tmp_path / "v.npz.partial"
+    InferenceCheckpoint(path, {"assumed_hfov_deg": 65.0}).save(
+        _filled_track(500, 300), done=300
+    )
+
+    restored, start = InferenceCheckpoint(path, {"assumed_hfov_deg": 90.0}).resume(500)
+    assert (restored, start) == (None, 0)
+    assert not path.exists(), "an incompatible partial must be removed, not left to rot"
+
+
+def test_checkpoint_refuses_a_partial_of_the_wrong_length(tmp_path):
+    from qc.pose.checkpoint import InferenceCheckpoint
+
+    fp = {"a": 1}
+    path = tmp_path / "v.npz.partial"
+    InferenceCheckpoint(path, fp).save(_filled_track(500, 300), done=300)
+
+    restored, start = InferenceCheckpoint(path, fp).resume(400)
+    assert (restored, start) == (None, 0)
+
+
+def test_checkpoint_survives_a_corrupt_partial(tmp_path):
+    """A bad cache file costs recomputation, never a failed run."""
+    from qc.pose.checkpoint import InferenceCheckpoint
+
+    path = tmp_path / "v.npz.partial"
+    path.write_bytes(b"not an npz")
+
+    restored, start = InferenceCheckpoint(path, {"a": 1}).resume(500)
+    assert (restored, start) == (None, 0)
+    assert not path.exists()
+
+
+def test_checkpoint_missing_partial_starts_from_zero(tmp_path):
+    from qc.pose.checkpoint import InferenceCheckpoint
+
+    restored, start = InferenceCheckpoint(tmp_path / "absent.partial", {}).resume(500)
+    assert (restored, start) == (None, 0)
+
+
+def test_checkpoint_writes_only_on_the_interval(tmp_path):
+    from qc.pose.checkpoint import InferenceCheckpoint
+
+    path = tmp_path / "v.npz.partial"
+    ckpt = InferenceCheckpoint(path, {"a": 1}, every=100)
+    track = _filled_track(500, 500)
+
+    for done in range(1, 100):
+        ckpt.maybe_save(track, done)
+    assert not path.exists()
+
+    ckpt.maybe_save(track, 100)
+    assert path.exists()
+
+
+def test_checkpoint_clear_removes_the_partial(tmp_path):
+    from qc.pose.checkpoint import InferenceCheckpoint
+
+    path = tmp_path / "v.npz.partial"
+    ckpt = InferenceCheckpoint(path, {"a": 1})
+    ckpt.save(_filled_track(10, 5), done=5)
+    assert path.exists()
+
+    ckpt.clear()
+    assert not path.exists()
+    ckpt.clear()  # idempotent — a second run must not trip over a gone file
+
+
+def test_resumed_progress_reports_the_rate_it_actually_achieved():
+    """A resumed pass must not claim throughput from the run that died."""
+    from pathlib import Path
+
+    from qc.config import VideoMeta as VM
+    from qc.pose.wilor_mini_backend import _InferenceProgress
+
+    meta = VM(path=Path("v.mp4"), width=1920, height=1080, fps=30.0,
+              n_frames=1000, n_frames_exact=True)
+    progress = _InferenceProgress(meta, start=900)
+    # 100 fresh frames in 10 seconds is 10 fps, not 90.
+    assert progress._rate(1000, 10.0) == pytest.approx(10.0)

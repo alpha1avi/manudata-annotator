@@ -143,8 +143,14 @@ class WiLoRBackend:
 
     # ── inference ─────────────────────────────────────────────────────
 
-    def infer(self, meta: VideoMeta) -> PoseTrack:
-        """Run detection and pose regression across the whole video."""
+    def infer(self, meta: VideoMeta, checkpoint: Optional[Path] = None) -> PoseTrack:
+        """Run detection and pose regression across the whole video.
+
+        *checkpoint* is accepted for interface compatibility and ignored:
+        this backend batches frames, so mid-video resume would need the
+        batch boundary recorded too. WiLoR-mini is what runs in
+        production and it does implement it.
+        """
         torch = self._torch
         track = PoseTrack.empty(meta.n_frames)
 

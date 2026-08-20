@@ -48,12 +48,13 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from qc.config import HAND_L, HAND_R, N_JOINTS, VideoMeta
-from qc.io.video_reader import iter_frames
+from qc.io.video_reader import FrameWindow, iter_frames
+from qc.pose.checkpoint import InferenceCheckpoint, strip_checkpoint_meta
 from qc.pose.schema import PoseTrack
 
 logger = logging.getLogger(__name__)
@@ -221,20 +222,40 @@ class WiLoRMiniBackend:
 
     # ── inference ─────────────────────────────────────────────────────
 
-    def infer(self, meta: VideoMeta) -> PoseTrack:
-        """Run detection and pose regression across the whole video."""
-        track = PoseTrack.empty(meta.n_frames)
-        seen = 0
+    def infer(self, meta: VideoMeta, checkpoint: Optional[Path] = None) -> PoseTrack:
+        """Run detection and pose regression across the whole video.
 
+        With *checkpoint*, the partially-filled track is written there
+        every few thousand frames and a compatible partial is resumed
+        from — so a killed instance loses a minute of work rather than
+        the whole pass. See :mod:`qc.pose.checkpoint`.
+        """
         self._prepare_depth_scale(meta)
+
+        ckpt = (
+            InferenceCheckpoint(checkpoint, self._checkpoint_fingerprint(meta))
+            if checkpoint is not None else None
+        )
+        track, start = ckpt.resume(meta.n_frames) if ckpt else (None, 0)
+        if track is None:
+            track, start = PoseTrack.empty(meta.n_frames), 0
+        seen = start
 
         # Inference is the long pole — tens of minutes on a full-length
         # video — so it reports progress. Without this the operator has no
         # way to tell a working run from a wedged one, which on a rented
         # instance is the difference between waiting and paying for nothing.
-        progress = _InferenceProgress(meta, log_every_s=PROGRESS_LOG_INTERVAL_S)
+        progress = _InferenceProgress(
+            meta, log_every_s=PROGRESS_LOG_INTERVAL_S, start=start,
+        )
 
-        for index, frame in iter_frames(meta):
+        # Frame-number selection on resume, never a timestamp seek: frame
+        # k here must be the same frame k an uninterrupted pass would have
+        # processed, or the resumed half of the track is offset from the
+        # half already on disk.
+        window = FrameWindow(start, meta.n_frames) if start > 0 else None
+
+        for index, frame in iter_frames(meta, window):
             seen = index + 1
             if index >= track.n_frames:
                 track = _grow(track, index + 1)
@@ -242,6 +263,8 @@ class WiLoRMiniBackend:
             rgb = np.ascontiguousarray(frame[:, :, ::-1])
             self._infer_frame(track, index, rgb)
             progress.update(seen, int(track.valid[index].sum()))
+            if ckpt is not None:
+                ckpt.maybe_save(track, seen)
 
         progress.close(seen)
 
@@ -268,7 +291,34 @@ class WiLoRMiniBackend:
         # nominal one).
         track.meta["focal_length_px"] = self._focal_assumed_px
         track.meta["principal_point_px"] = [meta.width / 2.0, meta.height / 2.0]
+
+        # The partial is deliberately *not* removed here. The caller still
+        # has to write the real .npz from what we return, and a crash in
+        # that window should still be resumable.  cache.get_track drops it
+        # once the durable file exists.
+        strip_checkpoint_meta(track)
         return track
+
+    def _checkpoint_fingerprint(self, meta: VideoMeta) -> Dict[str, Any]:
+        """Every input that changes the numbers a resumed pass would produce.
+
+        Deliberately includes the depth scale rather than just the
+        assumed FOV: mixing frames inferred at two different scales would
+        produce a track that looks entirely plausible and is wrong in its
+        second half.
+        """
+        return {
+            "backend": self.name,
+            "version": self.version,
+            "source": Path(meta.path).name,
+            "width": meta.width,
+            "height": meta.height,
+            "n_frames": meta.n_frames,
+            "det_threshold": float(self.det_threshold),
+            "rescale_factor": float(self.rescale_factor),
+            "assumed_hfov_deg": float(self.assumed_hfov_deg),
+            "depth_scale": round(float(self._depth_scale), 9),
+        }
 
     def _prepare_depth_scale(self, meta: VideoMeta) -> None:
         """Factor to rescale WiLoR's nominal-focal depth to an assumed FOV.
@@ -371,14 +421,28 @@ class _InferenceProgress:
     finding no hands looks different from one that is simply slow.
     """
 
-    def __init__(self, meta: VideoMeta, log_every_s: float = PROGRESS_LOG_INTERVAL_S):
+    def __init__(
+        self,
+        meta: VideoMeta,
+        log_every_s: float = PROGRESS_LOG_INTERVAL_S,
+        start: int = 0,
+    ):
         self.name = Path(meta.path).name
         self.total = max(1, meta.n_frames)
         self.fps_source = meta.fps
         self.log_every_s = log_every_s
+        # Frames already done by an earlier, checkpointed run. They count
+        # towards the percentage but not towards the measured rate, or a
+        # resumed run would report a throughput it never achieved and an
+        # ETA derived from it.
+        self.start = max(0, start)
         self.started = time.monotonic()
         self._last_log = self.started
         self._hands = 0
+
+    def _rate(self, done: int, elapsed: float) -> float:
+        fresh = done - self.start
+        return fresh / elapsed if elapsed > 0 and fresh > 0 else 0.0
 
     def update(self, done: int, hands_this_frame: int) -> None:
         self._hands += hands_this_frame
@@ -387,8 +451,7 @@ class _InferenceProgress:
             return
         self._last_log = now
 
-        elapsed = now - self.started
-        rate = done / elapsed if elapsed > 0 else 0.0
+        rate = self._rate(done, now - self.started)
         remaining = (self.total - done) / rate if rate > 0 else float("inf")
         logger.info(
             "%s: %d/%d frames (%.1f%%) | %.1f fps | %s left | %d hand-detections",
@@ -398,10 +461,11 @@ class _InferenceProgress:
 
     def close(self, done: int) -> None:
         elapsed = time.monotonic() - self.started
-        rate = done / elapsed if elapsed > 0 else 0.0
+        resumed = " (resumed at %d)" % self.start if self.start else ""
         logger.info(
-            "%s: inference done — %d frames in %s (%.1f fps), %d hand-detections",
-            self.name, done, _human(elapsed), rate, self._hands,
+            "%s: inference done — %d frames in %s (%.1f fps)%s, %d hand-detections",
+            self.name, done, _human(elapsed), self._rate(done, elapsed),
+            resumed, self._hands,
         )
 
 

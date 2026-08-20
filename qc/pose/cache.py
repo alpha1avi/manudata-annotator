@@ -16,18 +16,24 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 from qc.config import VideoMeta
+from qc.pose.checkpoint import partial_path
 from qc.pose.schema import PoseTrack, PoseTrackError
 
 logger = logging.getLogger(__name__)
 
 
 class PoseBackend(Protocol):
-    """What a keypoint producer has to offer."""
+    """What a keypoint producer has to offer.
+
+    *checkpoint* is a path a backend may use to save and resume partial
+    work within a single video; a backend that does not support it is
+    free to ignore the argument, at the cost of losing a killed pass.
+    """
 
     name: str
     version: str
 
-    def infer(self, meta: VideoMeta) -> PoseTrack:
+    def infer(self, meta: VideoMeta, checkpoint: Optional[Path] = None) -> PoseTrack:
         ...
 
 
@@ -94,8 +100,11 @@ def get_track(
             f"available. Expected {npz_path(keypoints_dir, meta.path)}."
         )
 
+    out = npz_path(keypoints_dir, meta.path)
+    partial = partial_path(out)
+
     logger.info("Running %s inference on %s", backend.name, meta.path.name)
-    track = backend.infer(meta)
+    track = backend.infer(meta, checkpoint=partial)
     track.assert_consistent()
 
     track.meta.update({
@@ -109,7 +118,12 @@ def get_track(
         "coordinate_frame": "camera-space metric, metres, +X right / +Y down / +Z forward",
     })
 
-    out = npz_path(keypoints_dir, meta.path)
     track.save(out)
     logger.info("Cached keypoints to %s", out.name)
+    # Only now — the durable file exists, so the partial is redundant. A
+    # crash before this point leaves it in place and the next run resumes.
+    try:
+        partial.unlink()
+    except OSError:
+        pass
     return track
