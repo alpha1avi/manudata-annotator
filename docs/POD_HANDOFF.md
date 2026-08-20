@@ -1,211 +1,163 @@
 # Pod handoff — current state and what to do next
 
-You are running on a rented Vast.ai GPU instance with direct access to the
-GPU, this repository, and the source footage. A previous Claude Code
-session built this tool from a cloud container that could not reach this
-machine, so everything below was verified either on that container (the
-render engine) or by the user pasting output back (the machine setup).
+You are Claude Code running **on the Vast.ai GPU instance**, with direct
+access to the GPU, this repository, and the source footage. Earlier
+sessions ran in a cloud container that could not reach this machine, so
+every pod-side fact below was established by the user pasting output
+back. You can now verify things yourself — do that rather than trusting
+this file where it is cheap to check.
 
-Read this whole file before running anything. The environment has several
-non-obvious constraints that have already cost hours.
+Read this whole file before running anything. Most of the constraints
+below were learned by losing an hour to them.
 
 ---
 
 ## The goal
 
-Produce hand-pose QC videos for a prospective customer (a technical
-evaluator at Google DeepMind Robotics). Each output is a side-by-side
-1080p MP4: source frame with a 21-keypoint 2D skeleton on the left, the
-same keypoints as an orbiting 3D skeleton on the right, frame-exact
-between panels. Plus `qc_report.csv` and a combined reel.
+Hand-pose QC videos for a technical evaluator at Google DeepMind
+Robotics. Each output is a side-by-side 1080p MP4: source frame with a
+21-keypoint 2D skeleton on the left, the same keypoints as an orbiting
+3D skeleton on the right, frame-exact between panels. Plus
+`qc_report.csv`, a shippable reel, and `docs/README_FOR_CUSTOMER.md`.
 
-The immediate milestone is a **10-second smoke test on one real video**
-that a human looks at. Everything else waits on that.
+Target: **ten full-length videos**, then the reel and README go out.
 
-## Machine state as of handoff
+## One command does everything
+
+```bash
+cd /root/manudata-qc
+./scripts/deliver.sh <drive-url-or-id> [more...] [--workers N]
+```
+
+That fetches from Drive, fixes the filename, pulls the repo current,
+checks the GPU, writes the manifest row, runs inference and both renders,
+verifies output byte sizes, and stages everything for download at
+`http://localhost:8080/`.
+
+For videos already on disk:
+
+```bash
+./scripts/run_video.sh /workspace/videos/*.mp4 --workers 3
+```
+
+**`--workers` only helps across videos.** One video is one worker's job
+by design — nothing about a video's pipeline splits across processes, so
+there is no shared cursor to desynchronise. Three videos and
+`--workers 3` runs three at once; one video and `--workers 3` runs one.
+
+## What has already been done
 
 | | |
 |---|---|
-| GPU | RTX 4090, 24 GB |
-| Python | **system `python3` 3.10** — use this, not the venv |
-| torch | 2.5.0+cu124 — **`torch.cuda.is_available()` was returning False** |
-| wilor_mini | installed and imports OK |
-| ffmpeg | 4.4.2, and **NVENC works** (verified by `doctor`) |
-| Repo | `~/manudata-qc`, branch `claude/manudata-hand-pose-qc-jqn3a8` |
-| WiLoR weights | `~/pretrained_models` — detector.pt, wilor_final.ckpt, model_config.yaml |
-| Video | `/workspace/videos/2026_0619_141716_003.MP4` (2.8 GB) |
-| Output dir | `/workspace/out` |
+| `India_Faridabad_AlpineFootwear01_ShoeAssembly_008_016.mp4` | **complete** — 45,030 frames, keypoints + 1.05 GB render, verified |
+| `2026_0619_141716_003.MP4` | rendered, but with **placeholder site/task burned into every frame** — needs real labels then a re-render (no re-inference) |
+| `India_Faridabad_CosmoReflectors01_FrameFabrication_006_002.mp4` | next up, 3.78 GB, on Drive |
 
-**There is a split-brain Python problem.** A virtualenv at
-`~/manudata-qc/.venv` (or `~/venv`) has torch 2.6.0 and the QC tool;
-system Python has torch 2.5.0 and wilor_mini. Consolidate on **system
-Python**. Do not activate the venv.
+Measured on the completed video, and worth quoting to the customer:
 
-## Blockers to clear first
+- Hand visible in **86.1%** of hand-slots; both hands posed in **76.2%**
+  of frames; longest gap 6.9 s.
+- Wrist→middle-MCP **0.095 m on both hands independently**, thumb-tip to
+  pinky-tip reaching **0.183 m** at maximum spread. Anatomically correct,
+  which is what rules out a joint-ordering bug — the low *median* span
+  (0.07 m) is just hands closed around workpieces.
+- `valid == hand_visible` everywhere, because WiLoR-mini poses every hand
+  it detects. See the README's callout: `pose_recovery_pct` is
+  structurally 100% here and must **not** be presented as a measured
+  accuracy.
 
-### 1. CUDA initialisation failure
+## Constraints that have already cost hours
 
-```
-RuntimeError: CUDA unknown error ... Setting the available devices to be zero.
-```
+**Always work inside tmux.** Both scripts relaunch themselves into it, so
+just use them. A run started in a bare SSH session dies with the session;
+this killed a render mid-encode.
 
-torch 2.6.0 in the venv previously worked on this same GPU, so the GPU and
-driver are fine — this is a wedged CUDA context, not a wheel mismatch.
-Check `nvidia-smi`, then `echo $CUDA_VISIBLE_DEVICES`. If `nvidia-smi` is
-healthy and torch still reports False, the instance needs a stop/start
-from the Vast dashboard (`/root` and `/workspace` persist).
+**Pull before running.** One run produced no progress output for 78
+minutes because the commit that *added* progress output had never been
+pulled. `run_video.sh` now fast-forwards automatically when the tree is
+clean.
 
-Do not proceed past this. WiLoR on CPU is ~100× slower and would silently
-burn the rental.
+**The NVIDIA driver breaks under you.** When Vast upgrades the host
+driver, `nvidia-smi` starts reporting a driver/library version mismatch.
+Already-running CUDA processes survive; new ones fail, and NVENC
+disappears — which turns a 2-minute encode into 20. Fix is **Stop then
+Start** the instance in the Vast console (never Destroy, that loses the
+disk). `run_video.sh` refuses to start when it detects this.
 
-### 2. Editable install rejected
+**Site and task are burned into every frame.** They come from the
+filename convention `Country_City_Site_Task_NNN_NNN` or from a manifest
+row, and are never guessed. Drive's `Copy of ` prefix breaks the parser;
+`deliver.sh` strips it on arrival.
 
-```
-build backend is missing the 'build_editable' hook
-```
+**Inference checkpoints every 2000 frames** to `<stem>.npz.partial`, so a
+killed pass loses a minute, not an hour. A partial is only reused when
+the source, backend and every parameter that changes the numbers match —
+including the derived depth scale. Do not loosen that: mixing two depth
+scales gives a track that passes every consistency check and is wrong in
+half its frames.
 
-setuptools predates PEP 660:
+**Use `python3`,** not `python` — the latter is not installed.
 
-```bash
-pip install -U pip setuptools wheel
-cd ~/manudata-qc && pip install -e ".[dev]"
-```
-
-Then `python3 -m pytest tests/test_qc.py -q` — **44 tests must pass.**
-They cover the render engine, visibility state machine, clip selection and
-resume logic, and need no GPU or footage.
-
-## The real work: the pose backend does not match the installed library
-
-`qc/pose/wilor_backend.py` was written against **upstream WiLoR**
-(`from wilor.models import load_wilor`, `ViTDetDataset`, etc.). Upstream
-has no `setup.py`, is not pip-installable, and additionally requires
-`MANO_RIGHT.pkl` from a licence-gated download. It is **not** what is
-installed here.
-
-What *is* installed is **WiLoR-mini**, with a completely different API:
-
-```python
-from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import (
-    WiLorHandPose3dEstimationPipeline,
-)
-pipe = WiLorHandPose3dEstimationPipeline(device=torch.device("cuda"),
-                                         dtype=torch.float16)
-outputs = pipe.predict(rgb_image)      # note: RGB, not BGR
-```
-
-**Step one is to probe its real output structure**, not to guess at it:
+## Known-good invocation
 
 ```bash
-cd /workspace/videos
-ffmpeg -v error -i "2026_0619_141716_003.MP4" -vf "select=eq(n\,600)" \
-    -vsync 0 -frames:v 1 -y /tmp/probe.png
-
-python3 - <<'PY'
-import cv2, torch
-from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
-pipe = WiLorHandPose3dEstimationPipeline(device=torch.device("cuda"), dtype=torch.float16)
-img = cv2.cvtColor(cv2.imread("/tmp/probe.png"), cv2.COLOR_BGR2RGB)
-out = pipe.predict(img)
-print(type(out), len(out) if hasattr(out, "__len__") else "")
-def show(o, i=0):
-    p = "  " * i
-    if isinstance(o, dict):
-        for k, v in o.items():
-            if isinstance(v, (dict, list)): print(f"{p}{k}:"); show(v, i+1)
-            elif hasattr(v, "shape"): print(f"{p}{k}: {tuple(v.shape)} {v.dtype}")
-            else: print(f"{p}{k}: {type(v).__name__} = {str(v)[:80]}")
-    elif isinstance(o, list):
-        print(f"{p}list[{len(o)}]")
-        if o: show(o[0], i+1)
-show(out)
-PY
+python3 -m qc.cli run VIDEO \
+    --out /workspace/out \
+    --keypoints-dir /workspace/out/keypoints \
+    --pose-backend wilor_mini \
+    --wilor-weights /root/pretrained_models \
+    --resume \
+    --max-size-mb 0          # 0 = uncapped, for the archival render
 ```
 
-Then write `qc/pose/wilor_mini_backend.py` producing a `PoseTrack`
-(see `qc/pose/schema.py`) and register it as a `--pose-backend` choice in
-`qc/cli.py` and `qc/parallel.py`. Leave `wilor_backend.py` in place for
-anyone using upstream.
+The reel is a second pass over the same cached keypoints with
+`--clips-only --max-size-mb 50`. `run_video.sh` does both.
 
-### Semantics that must be preserved
+## Rough timings (RTX 4090, one video, 25 min of 1080p+ footage)
 
-The entire report and render design rests on **separating two kinds of
-missing pose**. Do not collapse them:
-
-| Flag | Meaning |
+| Stage | Time |
 |---|---|
-| `hand_visible[t, h]` | a hand detector found a hand — a fact about the factory floor |
-| `valid[t, h]` | a pose was recovered for it — a fact about our tracker |
+| Model load / first-run setup | ~25 min once per container |
+| Inference | ~78 min (GPU only 7–10% used — it is CPU-bound) |
+| Render, NVENC | ~2–5 min |
+| Render, libx264 fallback | ~20 min |
 
-`pose_recovery_pct` is computed over visible-hand slots only, so occlusion
-neither flatters nor penalises the tracking number. This is the figure the
-customer README leads with.
+Because inference is CPU-bound, running 3 videos concurrently is close to
+a true 3× rather than a partial win. That is the single biggest lever on
+the ten-video batch.
 
-If WiLoR-mini does **not** expose detection separately from pose (i.e. it
-only returns successful hands), say so explicitly rather than faking the
-distinction. In that case `hand_visible` must be set equal to `valid`, and
-the operator told that case (b) cannot be measured with this backend —
-which materially changes what the customer README may claim. Flag it; do
-not paper over it.
+## What needs doing
 
-Other invariants:
+1. **Run the remaining videos.** Batch them 3 at a time with
+   `--workers 3`.
+2. **`2026_0619_141716_003.MP4` needs a real site and task** from the
+   user. Its name cannot be parsed, so there is nothing to derive. Once
+   you have them, add the manifest row and re-render — the keypoints are
+   cached, so this costs a render, not an inference.
+3. **Build the reel** across all finished videos and confirm it is under
+   50 MB.
+4. **Check `docs/README_FOR_CUSTOMER.md`** still matches what shipped —
+   particularly the intrinsics section, which rests on an assumed 65°
+   horizontal FOV. If the user supplies the SJCAM's true FOV, re-run with
+   `--assumed-hfov` and update the doc. Depth is linear in focal length,
+   so this rescales `kp3d` depth without moving a single 2D keypoint.
 
-- **Frame-exactness.** One absolute frame index drives decode, pose
-  lookup, both panels and the header. Frame windows use ffmpeg's `select`
-  filter on frame *number*, never a timestamp seek. The render aborts on
-  any length disagreement rather than publishing offset panels.
-- Left hand is slot 0, right is slot 1. Handedness must come from the
-  model, not from x-position.
-- 3D keypoints are camera-space metres, +X right / +Y down / +Z forward.
-- Missing keypoints stay `NaN`. Ghosted poses in the render are display
-  only and must never reach the saved `.npz`.
+## Things to raise with the user rather than decide
 
-## Verification gates
+- **The MANO licence restricts commercial use.** WiLoR-mini
+  auto-downloads `MANO_RIGHT.pkl`, which does not change those terms.
+  This is worth a deliberate decision before the keypoints are embedded
+  in a paid dataset delivery.
+- **Absolute depth is an assumption, not a measurement** (65° assumed
+  FOV). Relative geometry is well conditioned; absolute hand-to-camera
+  distance is not. The README says so — keep it that way.
 
-```bash
-# 1. preflight — GPU, weights, videos, manifest, disk, workers vs VRAM
-manudata-qc-render doctor /workspace/videos --out /workspace/out \
-    --wilor-weights ~/pretrained_models --workers 3
+## Never
 
-# 2. labels (site and task get burned into every frame)
-manudata-qc-render init-manifest /workspace/videos --out /workspace/out/manifest.csv
-# this file has a raw camera name, so the convention parser will not fire —
-# the task column must be filled in by hand before rendering
-
-# 3. smoke test — 10 seconds, then LOOK AT THE MP4
-manudata-qc-render run /workspace/videos --out /workspace/out \
-    --limit 1 --smoke-test 10 --no-reel --pose-backend <new backend>
-```
-
-Check on the smoke test output: skeleton sits on the hands and does not
-lag, `L` is on the left hand and `R` on the right, the 3D skeleton does
-not change size as it orbits, header shows the right site and task.
-
-Report the inference **fps** — it is the only real throughput number
-available and everything downstream is estimated from it.
-
-## Environment lessons already paid for
-
-- **Never scp footage to this pod.** Measured at 70 KB/s from the user's
-  connection (~10 h for one 2.6 GB file). Google Drive via `gdown` on the
-  pod measured **20.3 MB/s** — roughly 290× faster. Route all data
-  through Drive.
-- WiLoR-mini pins `torch<=2.5`. Do not upgrade torch past 2.5.
-- `python` does not exist; use `python3`.
-- Use `tmux` — SSH has dropped repeatedly and killed long jobs.
-- 1080p60 measured on the render engine: ~18.8 ms/frame to composite,
-  ~63 ms/frame for the whole decode→composite→encode loop with libx264.
-  NVENC works here, so expect better.
-- `--max-size-mb 50` is right for a 25 s clip and useless for a 25 min one
-  (~260 kbps). Use `--max-size-mb 0` for full-length renders.
-
-## Scale, once the smoke test passes
-
-The user wants ~10 full-length renders. Source files are ~2.6 GB each,
-disk is 274 GB, so storage is not a constraint. Use `--workers 3` (each
-WiLoR worker needs roughly 6 GB of the 24 GB VRAM) and `--resume`.
-`--shard I/N` splits the list across several pods without overlap.
-
-Run `--analyze-only` first and read the ranked table: it sorts by
-`pose_recovery_pct` and names the best 20–30 s window per video, which is
-how the reel clips get chosen.
+- Paste an SSH private key, a pod password, or a Drive token into chat or
+  into a commit. The `.pub` half is fine.
+- Present `pose_recovery_pct` as a measured tracking accuracy.
+- Ship a render whose byte size disagrees with its `.done.json` sidecar.
+  `+faststart` writes the index at the front of the file, so a truncated
+  MP4 still reports its full frame count — byte size is the only check
+  that catches it.
