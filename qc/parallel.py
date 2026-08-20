@@ -42,6 +42,10 @@ class BackendSpec:
     weights_dir: Optional[Path] = None
     device: Optional[str] = None
     batch_size: int = 8
+    # None means the backend's default assumption. Set it once the camera's
+    # true field of view is known — depth is linear in focal, so this is the
+    # single number that converts assumed depth into measured depth.
+    assumed_hfov_deg: Optional[float] = None
 
     def build(self):
         if self.kind == "wilor":
@@ -53,11 +57,19 @@ class BackendSpec:
                 batch_size=self.batch_size,
             )
         if self.kind == "wilor_mini":
-            from qc.pose.wilor_mini_backend import WiLoRMiniBackend
+            from qc.pose.wilor_mini_backend import (
+                DEFAULT_ASSUMED_HFOV_DEG,
+                WiLoRMiniBackend,
+            )
 
             return WiLoRMiniBackend(
                 weights_dir=self.weights_dir,
                 device=self.device,
+                assumed_hfov_deg=(
+                    self.assumed_hfov_deg
+                    if self.assumed_hfov_deg is not None
+                    else DEFAULT_ASSUMED_HFOV_DEG
+                ),
             )
         return None
 

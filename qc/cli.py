@@ -144,6 +144,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--device", default=None, help="Torch device, e.g. cuda:0.")
     run.add_argument("--batch-size", type=int, default=8,
                      help="Frames per inference batch (default: 8).")
+    run.add_argument("--assumed-hfov", type=float, default=None, metavar="DEG",
+                     help="Horizontal field of view assumed for depth scaling "
+                          "(wilor_mini only; default 65). WiLoR resolves monocular "
+                          "depth with a nominal focal that puts hands at ~12 m; "
+                          "depth is linear in focal, so this is the one number that "
+                          "sets absolute depth. Pass the camera's true HFOV once "
+                          "known to turn an assumption into a measurement.")
     run.add_argument("--force-inference", action="store_true",
                      help="Recompute keypoints even when a cache exists.")
 
@@ -268,6 +275,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         backend_spec = BackendSpec(
             kind=args.pose_backend, weights_dir=Path(args.wilor_weights),
             device=args.device, batch_size=args.batch_size,
+            assumed_hfov_deg=args.assumed_hfov,
         )
         # Validate the weight files without constructing the model. Building
         # it here would initialise CUDA in the parent, which a spawned pool
