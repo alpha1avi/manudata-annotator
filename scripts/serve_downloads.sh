@@ -40,23 +40,56 @@ if [[ ! -d "$OUT_DIR" ]]; then
 fi
 
 STAGE="$OUT_DIR/_download"
+rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
-# The metadata is many small files, and many small files over HTTP means
-# many round trips. One tarball is a single click and a single transfer.
+shopt -s nullglob
+
+# The keypoints are the point of the whole exercise: an hour of GPU time
+# each, and the only artefact that cannot be cheaply regenerated. Refuse
+# to serve a download that silently lacks them — a missing .npz noticed
+# after the instance is destroyed is unrecoverable.
+KEYPOINTS=( "$OUT_DIR"/keypoints/*.npz )
+if (( ${#KEYPOINTS[@]} == 0 )); then
+    echo "No .npz keypoint files in $OUT_DIR/keypoints/." >&2
+    echo "Nothing worth downloading yet — has the analysis pass finished?" >&2
+    exit 1
+fi
+
+# Collect what exists rather than assuming a fixed layout; a run stopped
+# early legitimately has no renders yet.
+BUNDLE_ITEMS=()
+for item in qc_report.csv manifest.csv batch.log logs keypoints; do
+    [[ -e "$OUT_DIR/$item" ]] && BUNDLE_ITEMS+=( "$item" )
+done
+for sidecar in "$OUT_DIR"/renders/*.done.json; do
+    BUNDLE_ITEMS+=( "renders/$(basename "$sidecar")" )
+done
+
+# One tarball for the many small files — many small files over HTTP means
+# many round trips.
 BUNDLE="$STAGE/manudata_qc_data.tar.gz"
-echo "Bundling keypoints, report and logs..."
-tar czf "$BUNDLE" -C "$OUT_DIR" \
-    --exclude="_download" \
-    $(cd "$OUT_DIR" && ls -d qc_report.csv manifest.csv batch.log logs keypoints 2>/dev/null) \
-    $(cd "$OUT_DIR" && ls renders/*.done.json 2>/dev/null || true)
+echo "Bundling ${#KEYPOINTS[@]} keypoint file(s), report and logs..."
+tar czf "$BUNDLE" -C "$OUT_DIR" "${BUNDLE_ITEMS[@]}"
+
+# ...and the keypoints again, individually, so they are visible in the
+# browser listing. Buried inside a tarball they look absent, and the file
+# you must not leave behind is the one that should be hardest to miss.
+for npz in "${KEYPOINTS[@]}"; do
+    ln -sf "$npz" "$STAGE/$(basename "$npz")"
+done
 
 # Renders are linked rather than copied: they are gigabytes each and
 # duplicating them to stage a download is a good way to fill the disk.
-shopt -s nullglob
 for mp4 in "$OUT_DIR"/renders/*.mp4 "$OUT_DIR"/*.mp4; do
     ln -sf "$mp4" "$STAGE/$(basename "$mp4")"
 done
+
+# Small enough to be worth having loose as well as in the bundle.
+for extra in "$OUT_DIR"/qc_report.csv "$OUT_DIR"/manifest.csv; do
+    [[ -e "$extra" ]] && ln -sf "$extra" "$STAGE/$(basename "$extra")"
+done
+
 shopt -u nullglob
 
 echo
@@ -104,10 +137,13 @@ then open:
 
     http://localhost:$PORT/
 
-Download manudata_qc_data.tar.gz first — it is small and holds the
-keypoints, which are the part that cannot be regenerated cheaply.
-Then the .mp4 files. Verify against SHA256SUMS when they land: a
-truncated MP4 still plays and still reports its full duration.
+The .npz keypoint files are listed individually AND inside
+manudata_qc_data.tar.gz — take either, but do not leave without them.
+They cost an hour of GPU each and nothing else regenerates them; the
+MP4s can be re-rendered from them in twenty minutes.
+
+Verify against SHA256SUMS when they land: a truncated MP4 still plays
+and still reports its full duration, so size alone proves nothing.
 
 Stop the server when you are done:
 
