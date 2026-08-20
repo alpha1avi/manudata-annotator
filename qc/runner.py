@@ -30,6 +30,7 @@ from qc.io.video_writer import VideoWriter, read_sidecar, write_sidecar
 from qc.manifest import Label
 from qc.pose.gapfill import build_render_plan
 from qc.pose.schema import PoseTrack, PoseTrackError
+from qc.progress import PeriodicProgress
 from qc.render.compositor import FrameComposer
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,12 @@ def render_video(
         position=position,
         dynamic_ncols=True,
     )
+    # A render inside a worker has no bar, and a full-length render takes
+    # tens of minutes. Without this it is completely silent for that whole
+    # time and indistinguishable from a hang.
+    progress = PeriodicProgress(
+        meta.path.name, expected, unit="frames", enabled=not show_progress,
+    )
 
     try:
         with VideoWriter(
@@ -101,8 +108,10 @@ def render_video(
                 written += 1
                 last_index = index
                 bar.update(1)
+                progress.update(written)
     finally:
         bar.close()
+        progress.close(written, what="render complete")
 
     if written != expected:
         raise PoseTrackError(

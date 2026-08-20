@@ -45,7 +45,6 @@ from __future__ import annotations
 import logging
 import math
 import tempfile
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -56,6 +55,7 @@ from qc.config import HAND_L, HAND_R, N_JOINTS, VideoMeta
 from qc.io.video_reader import FrameWindow, iter_frames
 from qc.pose.checkpoint import InferenceCheckpoint, strip_checkpoint_meta
 from qc.pose.schema import PoseTrack
+from qc.progress import PeriodicProgress, human_duration
 
 logger = logging.getLogger(__name__)
 
@@ -413,12 +413,12 @@ class WiLoRMiniBackend:
 # ── helpers, kept free of any torch types ─────────────────────────────
 
 
-class _InferenceProgress:
-    """Periodic progress lines for the long inference pass.
+class _InferenceProgress(PeriodicProgress):
+    """Inference progress, plus a running hand-detection count.
 
-    Reports throughput and a projected finish time from the rate measured
-    so far, plus a running detection count — so a run that is alive but
-    finding no hands looks different from one that is simply slow.
+    The detection count is the part that is specific to this pass: a run
+    that is alive but finding no hands looks identical to a healthy one
+    on throughput alone, and that difference matters more than the rate.
     """
 
     def __init__(
@@ -427,57 +427,30 @@ class _InferenceProgress:
         log_every_s: float = PROGRESS_LOG_INTERVAL_S,
         start: int = 0,
     ):
-        self.name = Path(meta.path).name
-        self.total = max(1, meta.n_frames)
-        self.fps_source = meta.fps
-        self.log_every_s = log_every_s
-        # Frames already done by an earlier, checkpointed run. They count
-        # towards the percentage but not towards the measured rate, or a
-        # resumed run would report a throughput it never achieved and an
-        # ETA derived from it.
-        self.start = max(0, start)
-        self.started = time.monotonic()
-        self._last_log = self.started
+        super().__init__(
+            name=Path(meta.path).name,
+            total=meta.n_frames,
+            interval_s=log_every_s,
+            start=start,
+        )
         self._hands = 0
 
+    # Kept for the callers and tests that predate PeriodicProgress.
     def _rate(self, done: int, elapsed: float) -> float:
-        fresh = done - self.start
-        return fresh / elapsed if elapsed > 0 and fresh > 0 else 0.0
+        return self.rate(done, elapsed)
 
-    def update(self, done: int, hands_this_frame: int) -> None:
+    def update(self, done: int, hands_this_frame: int = 0) -> None:
         self._hands += hands_this_frame
-        now = time.monotonic()
-        if now - self._last_log < self.log_every_s:
-            return
-        self._last_log = now
-
-        rate = self._rate(done, now - self.started)
-        remaining = (self.total - done) / rate if rate > 0 else float("inf")
-        logger.info(
-            "%s: %d/%d frames (%.1f%%) | %.1f fps | %s left | %d hand-detections",
-            self.name, done, self.total, 100.0 * done / self.total,
-            rate, _human(remaining), self._hands,
-        )
+        super().update(done, suffix=f" | {self._hands} hand-detections")
 
     def close(self, done: int) -> None:
-        elapsed = time.monotonic() - self.started
-        resumed = " (resumed at %d)" % self.start if self.start else ""
-        logger.info(
-            "%s: inference done — %d frames in %s (%.1f fps)%s, %d hand-detections",
-            self.name, done, _human(elapsed), self._rate(done, elapsed),
-            resumed, self._hands,
+        super().close(
+            done, what="inference done",
+            suffix=f", {self._hands} hand-detections",
         )
 
 
-def _human(seconds: float) -> str:
-    if seconds == float("inf"):
-        return "unknown"
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m{seconds % 60:02d}s"
-    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+_human = human_duration
 
 
 def _fast_gaussian(image, sigma=1.0, channel_axis=None, preserve_range=True, **kwargs):

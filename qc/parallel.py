@@ -226,6 +226,12 @@ def execute(
     if not jobs:
         return []
 
+    # More processes than jobs buys nothing and costs the operator the
+    # progress bar: the pool path suppresses bars because several would
+    # interleave, so a single job on a three-worker pool runs silent for
+    # no reason at all.
+    workers = min(workers, len(jobs))
+
     if workers <= 1:
         results = []
         for i, job in enumerate(jobs, start=1):

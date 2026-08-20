@@ -7,6 +7,8 @@ missing-pose cases being conflated into one number.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -632,3 +634,71 @@ def test_resumed_progress_reports_the_rate_it_actually_achieved():
     progress = _InferenceProgress(meta, start=900)
     # 100 fresh frames in 10 seconds is 10 fps, not 90.
     assert progress._rate(1000, 10.0) == pytest.approx(10.0)
+
+
+# ── progress reporting ────────────────────────────────────────────────
+
+
+def test_periodic_progress_rate_excludes_resumed_work():
+    from qc.progress import PeriodicProgress
+
+    p = PeriodicProgress("v.mp4", total=1000, start=900)
+    assert p.rate(1000, 10.0) == pytest.approx(10.0)
+
+    fresh = PeriodicProgress("v.mp4", total=1000)
+    assert fresh.rate(1000, 10.0) == pytest.approx(100.0)
+
+
+def test_periodic_progress_respects_its_interval(caplog):
+    from qc.progress import PeriodicProgress
+
+    p = PeriodicProgress("v.mp4", total=100, interval_s=3600)
+    with caplog.at_level("INFO", logger="qc.progress"):
+        for i in range(1, 51):
+            p.update(i)
+    assert caplog.records == []
+
+
+def test_periodic_progress_is_silent_when_disabled(caplog):
+    from qc.progress import PeriodicProgress
+
+    p = PeriodicProgress("v.mp4", total=100, interval_s=0.0, enabled=False)
+    with caplog.at_level("INFO", logger="qc.progress"):
+        p.update(50)
+        p.close(50)
+    assert caplog.records == []
+
+
+def test_periodic_progress_reports_when_due(caplog):
+    from qc.progress import PeriodicProgress
+
+    p = PeriodicProgress("v.mp4", total=100, interval_s=0.0)
+    with caplog.at_level("INFO", logger="qc.progress"):
+        p.update(50)
+    assert "50/100" in caplog.text and "50.0%" in caplog.text
+
+
+def test_human_duration_formats_for_operators():
+    from qc.progress import human_duration
+
+    assert human_duration(45) == "45s"
+    assert human_duration(600) == "10m00s"
+    assert human_duration(7860) == "2h11m"
+    assert human_duration(float("inf")) == "unknown"
+    assert human_duration(float("nan")) == "unknown"
+
+
+def test_pool_never_spawns_more_workers_than_jobs():
+    """Three processes for one job runs silent and buys nothing."""
+    from qc.parallel import JobResult, execute
+
+    seen = []
+
+    def fake(job):
+        seen.append(job)
+        return JobResult(video=Path(str(job)), value=job)
+
+    # A single job must take the in-process path, not a spawned pool.
+    results = execute(fake, ["only-one"], workers=3, label="render")
+    assert len(results) == 1
+    assert seen == ["only-one"], "the job should have run in this process"
