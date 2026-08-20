@@ -487,3 +487,14 @@ def test_fingerprint_changes_with_render_affecting_settings():
     assert base.fingerprint() == RenderConfig().fingerprint()
     assert base.fingerprint() != RenderConfig(with_slam=True).fingerprint()
     assert base.fingerprint() != RenderConfig(max_size_mb=25.0).fingerprint()
+
+
+def test_inference_progress_time_formatting():
+    """Inference reports minutes and hours, not raw seconds."""
+    from qc.pose.wilor_mini_backend import _human
+
+    assert _human(45) == "45s"
+    assert _human(600) == "10m00s"
+    assert _human(2580) == "43m00s"
+    assert _human(7860) == "2h11m"
+    assert _human(float("inf")) == "unknown"

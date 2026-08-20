@@ -45,6 +45,7 @@ from __future__ import annotations
 import logging
 import math
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -75,6 +76,12 @@ DEFAULT_RESCALE_FACTOR = 2.5   # WiLoR-mini's own default crop padding
 # single 2D keypoint. This is an *assumption*, recorded in the track meta and
 # stated in README_FOR_CUSTOMER; intra-hand geometry stays exactly metric.
 DEFAULT_ASSUMED_HFOV_DEG = 65.0
+
+# How often the inference loop reports progress. Logged rather than drawn
+# as a bar because inference usually runs inside a spawned worker, where
+# several tqdm bars would fight over one terminal — and because a log line
+# survives being piped through `tee` into a batch log.
+PROGRESS_LOG_INTERVAL_S = 30.0
 
 
 class WiLoRMiniUnavailable(RuntimeError):
@@ -221,6 +228,12 @@ class WiLoRMiniBackend:
 
         self._prepare_depth_scale(meta)
 
+        # Inference is the long pole — tens of minutes on a full-length
+        # video — so it reports progress. Without this the operator has no
+        # way to tell a working run from a wedged one, which on a rented
+        # instance is the difference between waiting and paying for nothing.
+        progress = _InferenceProgress(meta, log_every_s=PROGRESS_LOG_INTERVAL_S)
+
         for index, frame in iter_frames(meta):
             seen = index + 1
             if index >= track.n_frames:
@@ -228,6 +241,9 @@ class WiLoRMiniBackend:
             # iter_frames yields BGR; WiLoR-mini expects RGB.
             rgb = np.ascontiguousarray(frame[:, :, ::-1])
             self._infer_frame(track, index, rgb)
+            progress.update(seen, int(track.valid[index].sum()))
+
+        progress.close(seen)
 
         if seen != track.n_frames:
             track = _truncate(track, seen)
@@ -345,6 +361,59 @@ class WiLoRMiniBackend:
 
 
 # ── helpers, kept free of any torch types ─────────────────────────────
+
+
+class _InferenceProgress:
+    """Periodic progress lines for the long inference pass.
+
+    Reports throughput and a projected finish time from the rate measured
+    so far, plus a running detection count — so a run that is alive but
+    finding no hands looks different from one that is simply slow.
+    """
+
+    def __init__(self, meta: VideoMeta, log_every_s: float = PROGRESS_LOG_INTERVAL_S):
+        self.name = Path(meta.path).name
+        self.total = max(1, meta.n_frames)
+        self.fps_source = meta.fps
+        self.log_every_s = log_every_s
+        self.started = time.monotonic()
+        self._last_log = self.started
+        self._hands = 0
+
+    def update(self, done: int, hands_this_frame: int) -> None:
+        self._hands += hands_this_frame
+        now = time.monotonic()
+        if now - self._last_log < self.log_every_s:
+            return
+        self._last_log = now
+
+        elapsed = now - self.started
+        rate = done / elapsed if elapsed > 0 else 0.0
+        remaining = (self.total - done) / rate if rate > 0 else float("inf")
+        logger.info(
+            "%s: %d/%d frames (%.1f%%) | %.1f fps | %s left | %d hand-detections",
+            self.name, done, self.total, 100.0 * done / self.total,
+            rate, _human(remaining), self._hands,
+        )
+
+    def close(self, done: int) -> None:
+        elapsed = time.monotonic() - self.started
+        rate = done / elapsed if elapsed > 0 else 0.0
+        logger.info(
+            "%s: inference done — %d frames in %s (%.1f fps), %d hand-detections",
+            self.name, done, _human(elapsed), rate, self._hands,
+        )
+
+
+def _human(seconds: float) -> str:
+    if seconds == float("inf"):
+        return "unknown"
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60:02d}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
 
 
 def _fast_gaussian(image, sigma=1.0, channel_axis=None, preserve_range=True, **kwargs):
